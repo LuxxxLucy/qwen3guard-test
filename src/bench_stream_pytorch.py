@@ -47,6 +47,8 @@ def main() -> int:
     dtype = pick_dtype(device)
 
     print(f"[bench-stream-pt] model={args.model_id} device={device} dtype={dtype}")
+    print(f"[bench-stream-pt] n_warmup={args.n_warmup} n_samples={args.n_samples} "
+          f"stream_tokens={args.stream_tokens}")
     tok = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
     model = AutoModel.from_pretrained(
         args.model_id, dtype=dtype, trust_remote_code=True,
@@ -165,17 +167,25 @@ def main() -> int:
             extra=extra,
         )
         path = write_result(res, Path(args.out_dir))
+        pf = res.latency
+        pt = res.extra["per_token"]
         if target_len is not None:
             m = sweep_meta[target_len]
-            print(f"[bench-stream-pt] ({tag}  user={m['user_tokens_actual']}  "
-                  f"template={m['template_overhead_tokens']}  "
-                  f"total={m['total_input_tokens']}) wrote {path}")
+            header = (f"{tag}  user={m['user_tokens_actual']}  "
+                      f"template={m['template_overhead_tokens']}  "
+                      f"total={m['total_input_tokens']}")
         else:
-            print(f"[bench-stream-pt] ({tag} len={median_tokens}) wrote {path}")
-        print(f"[bench-stream-pt] prefill p50={res.latency.p50_ms:.1f}ms "
-              f"p95={res.latency.p95_ms:.1f}ms  "
-              f"per-token p50={res.extra['per_token']['p50_ms']:.2f}ms "
-              f"p95={res.extra['per_token']['p95_ms']:.2f}ms")
+            header = f"{tag} len={median_tokens}"
+        print(f"[bench-stream-pt] {header}")
+        print(f"[bench-stream-pt] prefill   n={pf.n:<4}  "
+              f"mean={pf.mean_ms:7.2f} stdev={pf.stdev_ms:6.2f} "
+              f"p50={pf.p50_ms:7.2f} p95={pf.p95_ms:7.2f} p99={pf.p99_ms:7.2f} "
+              f"min={pf.min_ms:7.2f} max={pf.max_ms:7.2f} rps={pf.throughput_rps:6.2f}")
+        print(f"[bench-stream-pt] per-token n={pt['n']:<4}  "
+              f"mean={pt['mean_ms']:7.2f} stdev={pt['stdev_ms']:6.2f} "
+              f"p50={pt['p50_ms']:7.2f} p95={pt['p95_ms']:7.2f} p99={pt['p99_ms']:7.2f} "
+              f"min={pt['min_ms']:7.2f} max={pt['max_ms']:7.2f} rps={pt['throughput_rps']:6.2f}")
+        print(f"[bench-stream-pt] wrote {path}")
     return 0
 
 
