@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+.uv-cache/
+uv.lock.bak
+
+# benchmark outputs
+results/*.json
+
+# locally exported ONNX weights (can be regenerated via scripts/)
+onnx_models/
+
+# HF cache lives in ~/.cache/huggingface by default; ignore any stray local copies
+hf_cache/
+
+# Local project status/notes (not part of the shipped artifact)
+status.md

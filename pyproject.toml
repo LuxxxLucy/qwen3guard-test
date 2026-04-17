@@ -1,0 +1,31 @@
+[project]
+name = "qwen3guard-test"
+version = "0.1.0"
+description = "Qwen3Guard latency benchmarks (PyTorch + ONNX, Gen + Stream, batch=1) — CUDA."
+requires-python = ">=3.11"
+# Target: Linux + CUDA. torch comes from the default PyPI channel (cu124 wheel
+# for 2.5.x / 2.6.x). Upper-bounded below 2.7 so we stay on cu124 wheels, which
+# work with NVIDIA drivers reporting CUDA 12.4+ (e.g. driver 12.5 on our box).
+# torch 2.7+ ships cu126, 2.8+ ships cu128 — both need newer drivers.
+# onnxruntime-gpu provides both CUDA and CPU execution providers in one package.
+dependencies = [
+    "torch>=2.5,<2.7",
+    "transformers>=4.51",
+    "datasets>=2.18",
+    "huggingface-hub>=0.24",
+    "numpy",
+    "onnx>=1.16",
+    "onnxruntime-gpu>=1.18; sys_platform == 'linux'",
+    "onnxruntime>=1.18; sys_platform != 'linux'",
+    "optimum>=1.22",
+    "optimum-onnx>=0.1",
+    "accelerate>=0.30",
+    "sentencepiece>=0.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
