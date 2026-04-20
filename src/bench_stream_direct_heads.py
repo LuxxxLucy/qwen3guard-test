@@ -121,6 +121,57 @@ def main() -> int:
 
     uid_tensor = torch.tensor([uid], dtype=torch.long, device=device)
 
+    # ---- Causality check --------------------------------------------------
+    # The bench's correctness argument rests on: verdict at asst position i
+    # depends only on tokens at positions <= i. In a causal transformer
+    # this is true by construction (causal attention mask + pointwise heads)
+    # — this function PROVES it empirically on the loaded checkpoint:
+    #
+    #   Run A: forward [asst_0..asst_{long-1}]   -> risk logits at all long positions
+    #   Run B: forward [asst_0..asst_{short-1}]  -> risk logits at all short positions
+    #
+    # Positions 0..short-1 in Run A were computed with Run A's later tokens
+    # in attention range; positions 0..short-1 in Run B did not see those
+    # later tokens. If causality holds, the logits at positions 0..short-1
+    # must match between A and B (up to fp16 numerical noise).
+    def causality_check(asst_tokens_long: list[int], short_len: int) -> dict:
+        long_len = len(asst_tokens_long)
+        assert short_len < long_len, "need short_len < long_len for a meaningful test"
+
+        def run_one(asst_ids_slice: list[int]):
+            cache = DynamicCache()
+            with torch.inference_mode():
+                model.forward(input_ids=uid_tensor, past_key_values=cache,
+                              use_cache=True)
+                chunk = torch.tensor([asst_ids_slice], dtype=torch.long,
+                                     device=device)
+                out = model.forward(input_ids=chunk, past_key_values=cache,
+                                    use_cache=True)
+            return out.risk_level_logits[0]  # [seq_len, num_risk]
+
+        logits_A = run_one(asst_tokens_long)
+        logits_B = run_one(asst_tokens_long[:short_len])
+
+        # Verdict equality at shared positions.
+        argmax_A = logits_A[:short_len].argmax(dim=-1).tolist()
+        argmax_B = logits_B.argmax(dim=-1).tolist()
+        verdict_matches = sum(a == b for a, b in zip(argmax_A, argmax_B))
+
+        # Logit numerical closeness — softer bar than exact equality because
+        # SDPA/attention kernels may reorder reductions across sequence length
+        # in bf16.
+        diff = (logits_A[:short_len].float() - logits_B.float()).abs()
+        max_abs = float(diff.max().item())
+        mean_abs = float(diff.mean().item())
+
+        return {
+            "short_len": short_len, "long_len": long_len,
+            "verdict_matches": verdict_matches,
+            "max_abs_logit_diff": max_abs,
+            "mean_abs_logit_diff": mean_abs,
+            "argmax_A": argmax_A, "argmax_B": argmax_B,
+        }
+
     # ---- Equivalence check helpers ----------------------------------------
     def direct_verdicts(asst_tokens: list[int], k: int) -> list[str]:
         """Run direct path with chunk size k, return per-asst-token risk-level strings."""
@@ -168,6 +219,34 @@ def main() -> int:
     # Warmup.
     direct_verdicts(eq_asst_ids[:4], k=1)
     sync(device)
+
+    print()
+    print("=" * 68)
+    print("[direct-heads] CAUSALITY CHECK")
+    print("[direct-heads] verifies: verdict at asst position i does NOT")
+    print("[direct-heads] depend on tokens at positions > i (i.e. the model")
+    print("[direct-heads] is genuinely causal and chunking is safe).")
+    print("=" * 68)
+    # Use a context where long_len > short_len by a comfortable margin so
+    # the test is meaningful: short=16 positions vs long=64 positions means
+    # positions 0..15 in Run A had 48 future tokens in attention range, and
+    # they must still match Run B which saw no future tokens.
+    caus = causality_check(eq_asst_ids, short_len=16)
+    verdict_status = ("PASS" if caus["verdict_matches"] == caus["short_len"]
+                      else "FAIL")
+    print(f"[direct-heads] short={caus['short_len']} vs long={caus['long_len']}: "
+          f"{caus['verdict_matches']}/{caus['short_len']} verdicts match  "
+          f"[{verdict_status}]")
+    print(f"[direct-heads] logits (shared positions, bf16): "
+          f"max |diff| = {caus['max_abs_logit_diff']:.4e}  "
+          f"mean |diff| = {caus['mean_abs_logit_diff']:.4e}")
+    if caus["verdict_matches"] != caus["short_len"]:
+        print(f"[direct-heads] *** CAUSALITY VIOLATED *** "
+              f"— chunking is unsafe on this checkpoint.")
+        print(f"[direct-heads]   A (long={caus['long_len']}) argmaxes: "
+              f"{caus['argmax_A']}")
+        print(f"[direct-heads]   B (short={caus['short_len']}) argmaxes: "
+              f"{caus['argmax_B']}")
 
     print()
     print("=" * 68)
