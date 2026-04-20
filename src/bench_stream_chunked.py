@@ -99,10 +99,25 @@ def main() -> int:
     asst_ids = asst_ids_all[: args.n_assistant_tokens]
 
     # One-shot probe: dump the output shape for a k=1 and a k=max(chunks) call.
+    # The multi-token probe may fail if the model's stream_moderate_from_ids
+    # API only accepts 1 token per call — we catch and report that case.
     k_max = max(args.chunks)
     _probe_output_shape(model, tok, uid, asst_ids, k=1, label="probe k=1")
-    _probe_output_shape(model, tok, uid, asst_ids, k=k_max, label=f"probe k={k_max}")
+    try:
+        _probe_output_shape(model, tok, uid, asst_ids, k=k_max, label=f"probe k={k_max}")
+        api_accepts_chunks = True
+    except Exception as e:
+        print(f"[bench-chunked] probe k={k_max} FAILED: {type(e).__name__}: {e}")
+        print(f"[bench-chunked] → the model's stream_moderate_from_ids API does "
+              f"not accept k>1 chunks. Run bench_stream_direct.py instead, which "
+              f"bypasses the custom API and calls the backbone with KV cache.")
+        api_accepts_chunks = False
     sync(device)
+
+    if not api_accepts_chunks:
+        # Only k=1 is meaningful through the stock API. Report that baseline
+        # and exit cleanly.
+        args.chunks = [1]
 
     def run_chunk_size(k: int) -> dict:
         per_chunk_s: list[float] = []

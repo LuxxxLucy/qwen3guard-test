@@ -50,7 +50,9 @@ uv run python src/profile_stream.py --model-id "$STREAM_MODEL" --n-tokens 32
 
 echo ""
 echo "===================================================================="
-echo "### (2) chunked-streaming sweep — effective per-token vs chunk size"
+echo "### (2) chunked-stream sweep via the stock stream_moderate_from_ids API"
+echo "###     (expected to fall back to k=1 only — the API hardcodes 1 token"
+echo "###      per send; this run is just to confirm that diagnosis)"
 echo "===================================================================="
 echo ""
 uv run python src/bench_stream_chunked.py \
@@ -58,6 +60,33 @@ uv run python src/bench_stream_chunked.py \
     --chunks $CHUNKS \
     --n-assistant-tokens 128 \
     --n-prompts 20
+
+echo ""
+echo "===================================================================="
+echo "### (3) direct-path sweep — bypasses stream_moderate_from_ids and"
+echo "###     calls the Qwen3 backbone with a DynamicCache"
+echo "===================================================================="
+echo ""
+uv run python src/bench_stream_direct.py \
+    --model-id "$STREAM_MODEL" \
+    --chunks $CHUNKS \
+    --n-assistant-tokens 128 \
+    --n-prompts 20
+
+echo ""
+echo "===================================================================="
+echo "### (4) cached modeling_qwen3_guard.py source (for reading the exact"
+echo "###     stream_generate coroutine we are bypassing)"
+echo "===================================================================="
+MODELING_FILE=$(find ~/.cache/huggingface/modules -name "modeling_qwen3_guard.py" 2>/dev/null | head -1)
+if [[ -n "$MODELING_FILE" && -f "$MODELING_FILE" ]]; then
+    echo "[debug_stream] source file: $MODELING_FILE"
+    echo "--- BEGIN modeling_qwen3_guard.py ---"
+    cat "$MODELING_FILE"
+    echo "--- END modeling_qwen3_guard.py ---"
+else
+    echo "[debug_stream] could not locate cached modeling_qwen3_guard.py"
+fi
 
 echo ""
 echo "[debug_stream] done. Results/traces in $(pwd)/results/"
