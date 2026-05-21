@@ -11,6 +11,10 @@ that executes the forward:
   llamacpp  — llama.cpp via llama-cpp-python (GGUF f16 / q8_0 / q4_k_m)
 
 The exported artifacts are produced by scripts/export_gen_{onnx,openvino,gguf}.py.
+
+The llama.cpp backend also has a system-prompt KV-cache mode (kv_cache=True):
+prime_prefix() evaluates the shared prefix once, then verdict_logits() rewinds
+and evaluates only the variable suffix — the prefix KV is reused, never copied.
 """
 from __future__ import annotations
 
@@ -40,10 +44,11 @@ class GenBackend:
     runtime = "base"
 
     def __init__(self, precision: str, verdict_token_ids: list[int],
-                 threads: int | None):
+                 threads: int | None, kv_cache: bool = False):
         self.precision = precision
         self.verdict_token_ids = verdict_token_ids
         self.threads = threads
+        self.kv_cache = kv_cache
         self.detail = ""  # runtime/version string for the result JSON
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
@@ -53,6 +58,11 @@ class GenBackend:
         """Last-position logits for the 3 verdict token ids, in VERDICT_LABELS
         order. The forward pass plus this read is the timed region."""
         raise NotImplementedError
+
+    def prime_prefix(self, prefix_ids: list[int]) -> None:
+        """KV-cache mode: evaluate the shared system-prompt prefix once so
+        verdict_logits can reuse it. Only the llama.cpp backend implements it."""
+        raise NotImplementedError(f"{self.runtime} backend has no KV-cache mode")
 
     def predict(self, forced_ids: list[int]) -> int:
         """One L2 forward plus the restricted 3-way argmax — the timed unit of
@@ -166,17 +176,38 @@ class LlamaCppBackend(GenBackend):
             model_path=str(artifact),
             n_ctx=n_ctx,
             n_threads=self.threads or None,
-            logits_all=False,
             n_gpu_layers=0,
             verbose=False,
         )
-        self.detail = f"llama-cpp-python {llama_cpp.__version__} n_ctx={n_ctx}"
+        # Read the verdict logits straight from the context's last-position
+        # logits pointer. eval() does not populate the Llama.scores numpy
+        # buffer in llama-cpp-python 0.3.x (it stays zero); and copying that
+        # buffer — n_vocab floats — to read 3 of them would be pure waste.
+        self._ctx = self.llm._ctx.ctx
+        self._get_logits = llama_cpp.llama_get_logits_ith
+        self._prefix_len = 0
+        self.detail = (f"llama-cpp-python {llama_cpp.__version__} n_ctx={n_ctx}"
+                       + (" +kv-cache" if self.kv_cache else ""))
+
+    def prime_prefix(self, prefix_ids: list[int]) -> None:
+        """Evaluate the shared system-prompt prefix once. Its KV stays resident
+        in the context at positions 0..len-1; verdict_logits then rewinds to
+        this point per call — the prefix is never recomputed or copied."""
+        self.llm.reset()
+        self.llm.eval(prefix_ids)
+        self._prefix_len = self.llm.n_tokens
 
     def verdict_logits(self, forced_ids: list[int]) -> list[float]:
-        self.llm.reset()
-        self.llm.eval(forced_ids)
-        # llm.scores is (n_ctx, n_vocab); the last evaluated row is the readout.
-        row = self.llm.scores[self.llm.n_tokens - 1]
+        if self.kv_cache:
+            # Rewind the token counter to the cached prefix. eval() then drops
+            # the previous request's suffix KV in place (kv_cache_seq_rm) and
+            # appends only this request's suffix — the prefix KV is reused as-is.
+            self.llm.n_tokens = self._prefix_len
+            self.llm.eval(forced_ids[self._prefix_len:])
+        else:
+            self.llm.reset()
+            self.llm.eval(forced_ids)
+        row = self._get_logits(self._ctx, -1)
         return [float(row[v]) for v in self.verdict_token_ids]
 
 
@@ -189,9 +220,13 @@ _BACKENDS = {
 
 
 def make_backend(runtime: str, precision: str | None,
-                 verdict_token_ids: list[int], threads: int | None) -> GenBackend:
+                 verdict_token_ids: list[int], threads: int | None,
+                 kv_cache: bool = False) -> GenBackend:
     if runtime not in _BACKENDS:
         raise SystemExit(f"unknown runtime {runtime!r}; "
                          f"choose from {sorted(_BACKENDS)}")
+    if kv_cache and runtime != "llamacpp":
+        raise SystemExit(f"--kv-cache is implemented for --runtime llamacpp "
+                         f"only, not {runtime!r}.")
     prec = precision or DEFAULT_PRECISION[runtime]
-    return _BACKENDS[runtime](prec, verdict_token_ids, threads)
+    return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache)

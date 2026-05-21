@@ -15,6 +15,8 @@
 #   THREADS    CPU threads each runtime is pinned to   (default: physical cores)
 #   NSAMPLES   Gen timed iterations per cell            (default: 100)
 #   LENGTHS    if set, also run a Gen length sweep, e.g. LENGTHS="32 128 512 2048"
+#   TEMPLATE   Gen input template: original (built-in ~296-tok prompt) or
+#              test-200 (compressed ~130-tok prompt)    (default: original)
 #   VERIFY     "--no-verify" to skip the cross-runtime verdict check
 #   MODEL_ID / STREAM_MODEL   override the benchmarked checkpoints
 #
@@ -31,6 +33,7 @@ export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3Guard-Gen-0.6B}"
 STREAM_MODEL="${STREAM_MODEL:-Qwen/Qwen3Guard-Stream-0.6B}"
 NSAMPLES="${NSAMPLES:-100}"
+TEMPLATE="${TEMPLATE:-original}"
 VERIFY="${VERIFY:---verify}"
 BASENAME="$(basename "$MODEL_ID")"
 
@@ -71,7 +74,7 @@ step() {  # step "label" cmd args...
 }
 
 echo "[run_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$NSAMPLES"
-echo "[run_cpu] gen=$MODEL_ID  stream=$STREAM_MODEL"
+echo "[run_cpu] gen=$MODEL_ID  stream=$STREAM_MODEL  template=$TEMPLATE"
 [[ -n "${DRY_RUN:-}" ]] && echo "[run_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
 
 section "1/6  uv sync"
@@ -97,7 +100,7 @@ section "6/6  benchmarks"
 gen() {
     echo "--- Gen: $* ---"
     if uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
-        --n-samples "$NSAMPLES" --threads "$THREADS" $VERIFY \
+        --template "$TEMPLATE" --n-samples "$NSAMPLES" --threads "$THREADS" $VERIFY \
         "${LEN_ARGS[@]}" "${DRY_GEN[@]}" "$@"; then
         LEDGER+=("PASS  gen $*")
     else
@@ -114,6 +117,10 @@ gen --runtime openvino --precision int8 --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision int4 --artifact "ov_models/$BASENAME/int4"
 gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"
 gen --runtime llamacpp --precision q4_k_m --artifact "gguf_models/$BASENAME.q4_k_m.gguf"
+# llama.cpp again with the shared system-prompt prefix KV-cached (suffix-only
+# forward per request) — the head-to-head for the prefix-cache speedup.
+gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf" --kv-cache
+gen --runtime llamacpp --precision q4_k_m --artifact "gguf_models/$BASENAME.q4_k_m.gguf" --kv-cache
 
 echo "--- Stream: PyTorch-CPU shipped API ---"
 step "stream shipped-api" uv run python src/bench_stream_pytorch.py \

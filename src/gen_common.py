@@ -1,5 +1,5 @@
-"""Shared Qwen3Guard-Gen helpers: chat-template rendering, forced-prefix
-discovery, verdict-token-id discovery.
+"""Shared Qwen3Guard-Gen helpers: input rendering, forced-prefix discovery,
+verdict-token-id discovery.
 
 Runtime-agnostic — no torch / onnxruntime import here. The multi-runtime CPU
 benchmark (`bench_gen_cpu.py`) and its backends (`gen_backends.py`) all build
@@ -13,16 +13,50 @@ from __future__ import annotations
 # information-bearing token after "Safety: ".
 VERDICT_LABELS: tuple[str, ...] = ("Safe", "Unsafe", "Controversial")
 
+# Selectable input templates (--template). Both render to the same shape and
+# end at the assistant `<think>` block, so appending "Safety: " lands at the
+# start of the verdict line either way; they differ only in policy-block length.
+TEMPLATES: tuple[str, ...] = ("original", "test-200")
 
-def render_prompt(tokenizer, user_text: str) -> str:
-    """Apply the chat template with add_generation_prompt=True so the rendered
-    prompt ends at `<|im_start|>assistant\\n`. Appending "Safety: " then lands
-    cleanly at the start of the assistant response."""
-    return tokenizer.apply_chat_template(
-        [{"role": "user", "content": user_text}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+# `test-200`: a compressed safety policy. The built-in Qwen3Guard template adds
+# ~296 fixed tokens; this one adds ~130, so a representative input (~68 user
+# tokens) lands near a 200-token total. It is a latency-measurement template —
+# its verdict accuracy is not validated against the fine-tuned original prompt.
+# Split PRE/POST around the user content: PRE is the byte-identical prefix every
+# call shares — the unit a system-prompt KV cache would precompute once.
+_TEST_200_PRE = (
+    "<|im_start|>user\n"
+    "# Task: classify THE LAST USER query under the safety policy below.\n\n"
+    "Safe = no prohibited content; Unsafe = contains prohibited content; "
+    "Controversial = not explicit but exploitable in context.\n"
+    "Unsafe categories: Violent; Non-violent Illegal Acts; Sexual Content; PII; "
+    "Suicide & Self-Harm; Unethical Acts; Politically Sensitive Topics; "
+    "Copyright Violation; Jailbreak.\n\n"
+    "<BEGIN CONVERSATION>\n\nUSER: "
+)
+_TEST_200_POST = (
+    "\n\n<END CONVERSATION>\n\n"
+    "Answer with 'Safety: Safe', 'Safety: Unsafe', or 'Safety: Controversial'."
+    "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+)
+
+
+def render_prompt(tokenizer, user_text: str, template: str = "original") -> str:
+    """Render the classifier input for `user_text`.
+
+    `template="original"` applies the model's built-in Qwen3Guard chat template
+    (the prompt it was fine-tuned on); `template="test-200"` uses the compressed
+    policy above. Both end at the assistant `<think>` block, so appending
+    "Safety: " lands cleanly at the start of the verdict line."""
+    if template == "original":
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_text}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    if template == "test-200":
+        return _TEST_200_PRE + user_text + _TEST_200_POST
+    raise ValueError(f"unknown template {template!r}; choose from {TEMPLATES}")
 
 
 def discover_forced_prefix(
@@ -61,16 +95,16 @@ def discover_forced_prefix(
     return tokenized["Safe"][:diff_pos], diff_pos, verdict_ids
 
 
-def build_forced_ids(tokenizer, user_text: str) -> list[int]:
-    """Token sequence for `chat_template(user_text) + "Safety: "` — the L2
+def build_forced_ids(tokenizer, user_text: str, template: str = "original") -> list[int]:
+    """Token sequence for `render_prompt(user_text) + "Safety: "` — the L2
     forced-prefix input. One forward over these ids reads the verdict."""
     forced_ids, _, _ = discover_forced_prefix(
-        tokenizer, render_prompt(tokenizer, user_text)
+        tokenizer, render_prompt(tokenizer, user_text, template)
     )
     return forced_ids
 
 
-def discover_verdict_token_ids(tokenizer) -> dict[str, int]:
+def discover_verdict_token_ids(tokenizer, template: str = "original") -> dict[str, int]:
     """Discover the 3 verdict token ids (Safe / Unsafe / Controversial).
 
     The ids are tokenizer-dependent but prompt-independent in practice (the
@@ -78,9 +112,9 @@ def discover_verdict_token_ids(tokenizer) -> dict[str, int]:
     characters guard against a BPE merge that would make them prompt-varying.
     """
     _, _, ids1 = discover_forced_prefix(
-        tokenizer, render_prompt(tokenizer, "Representative probe content for verdict id discovery."))
+        tokenizer, render_prompt(tokenizer, "Representative probe content for verdict id discovery.", template))
     _, _, ids2 = discover_forced_prefix(
-        tokenizer, render_prompt(tokenizer, "Another arbitrary probe 12345 !@# so BPE can differ."))
+        tokenizer, render_prompt(tokenizer, "Another arbitrary probe 12345 !@# so BPE can differ.", template))
     if ids1 != ids2:
         raise RuntimeError(
             f"verdict token ids vary across prompts; cannot precompute a shared "

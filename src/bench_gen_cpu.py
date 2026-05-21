@@ -34,14 +34,29 @@ from gen_backends import PROVIDER_TAG, make_backend
 from gen_common import VERDICT_LABELS, build_forced_ids, discover_verdict_token_ids
 
 
-def build_samples(tok, n_samples: int, length: int | None) -> list[list[int]]:
+def build_samples(tok, n_samples: int, length: int | None,
+                  template: str) -> list[list[int]]:
     """Return n forced-prefix token sequences. `length` None = representative
-    dataset samples; otherwise synthetic prompts of that user-token length."""
+    dataset samples; otherwise synthetic prompts of that user-token length.
+    `template` selects the system-prompt block (see gen_common.render_prompt)."""
     if length is None:
         texts = load_representative_texts(max_samples=n_samples, tokenizer=tok)
     else:
         texts = synthesize_prompts(tok, target_tokens=length, n=n_samples, seed=length)
-    return [build_forced_ids(tok, t) for t in texts]
+    return [build_forced_ids(tok, t, template) for t in texts]
+
+
+def common_prefix(sample_pools: dict) -> list[int]:
+    """Longest leading token sequence shared by every sample across all pools —
+    KV-cache mode primes this once and evaluates only each sample's suffix.
+    Capped one short of the shortest sample so every suffix is non-empty."""
+    samples = [s for pool in sample_pools.values() for s in pool]
+    first = samples[0]
+    limit = min(len(s) for s in samples) - 1
+    p = 0
+    while p < limit and all(s[p] == first[p] for s in samples):
+        p += 1
+    return first[:p]
 
 
 def verify_against_pytorch(model_id: str, backend, samples: list[list[int]],
@@ -85,10 +100,14 @@ def run_cell(backend, samples: list[list[int]], args, length: int | None) -> Non
             "threads": args.threads,
             "runtime_detail": backend.detail,
             "target_user_tokens": length,
-            "chat_template_applied": True,
+            "template": args.template,
+            "kv_cache": args.kv_cache,
         },
     )
-    path = write_result(res, Path(args.out_dir), tag=f"_{backend.precision}")
+    tag = f"_{backend.precision}_{args.template}"
+    if args.kv_cache:
+        tag += "_kvcache"
+    path = write_result(res, Path(args.out_dir), tag=tag)
     lt = res.latency
     print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {mode} "
           f"len={median_tokens}  p50={lt.p50_ms:.1f}ms p95={lt.p95_ms:.1f}ms "
@@ -105,6 +124,11 @@ def main() -> int:
                          "(llamacpp). Default: the runtime's full precision.")
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B",
                     help="Source HF id — tokenizer + pytorch weights + tagging.")
+    ap.add_argument("--template", default="original", choices=["original", "test-200"],
+                    help="Input template. original: the model's built-in "
+                         "Qwen3Guard prompt (~296-token overhead). test-200: a "
+                         "compressed policy (~130-token overhead) so a "
+                         "representative input lands near 200 total tokens.")
     ap.add_argument("--artifact", default=None,
                     help="Exported-model path: ONNX export dir, OpenVINO export "
                          "dir, or .gguf file. Required for non-pytorch runtimes.")
@@ -116,6 +140,10 @@ def main() -> int:
     ap.add_argument("--lengths", type=int, nargs="+", default=None,
                     help="Length sweep (synthetic user-token counts). One "
                          "result file per length. Default: representative.")
+    ap.add_argument("--kv-cache", action="store_true",
+                    help="llama.cpp only: precompute the shared system-prompt "
+                         "prefix KV once, then time only the variable-suffix "
+                         "forward per request — the prefix-cache speedup.")
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
                     help="Cross-check verdict argmax against PyTorch-CPU fp32 on "
@@ -136,18 +164,25 @@ def main() -> int:
 
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model_id)
-    verdict_ids = discover_verdict_token_ids(tok)
+    verdict_ids = discover_verdict_token_ids(tok, args.template)
     verdict_token_ids = [verdict_ids[v] for v in VERDICT_LABELS]
     print(f"[bench-gen-cpu] model={args.model_id} runtime={args.runtime} "
-          f"verdict_token_ids={dict(verdict_ids)}")
+          f"template={args.template} verdict_token_ids={dict(verdict_ids)}")
 
     cells: list[int | None] = list(args.lengths) if args.lengths else [None]
-    sample_pools = {L: build_samples(tok, args.n_samples, L) for L in cells}
+    sample_pools = {L: build_samples(tok, args.n_samples, L, args.template) for L in cells}
     max_seq_len = max(len(s) for pool in sample_pools.values() for s in pool)
 
-    backend = make_backend(args.runtime, args.precision, verdict_token_ids, args.threads)
+    backend = make_backend(args.runtime, args.precision, verdict_token_ids,
+                           args.threads, args.kv_cache)
     backend.load(args.model_id, args.artifact, max_seq_len)
     print(f"[bench-gen-cpu] backend loaded: {backend.detail}")
+
+    if args.kv_cache:
+        prefix = common_prefix(sample_pools)
+        backend.prime_prefix(prefix)
+        print(f"[bench-gen-cpu] kv-cache primed: shared prefix = {len(prefix)} "
+              f"tokens (suffix-only forward per request)")
 
     if args.verify and args.runtime != "pytorch":
         verify_against_pytorch(args.model_id, backend,

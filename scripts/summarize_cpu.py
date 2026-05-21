@@ -39,14 +39,19 @@ def print_gen_table(rows: list[dict]) -> None:
     if not gen:
         print("  (no Gen CPU representative results)")
         return
-    gen = latest_per_key(gen, lambda r: (r.get("runtime", ""), r.get("dtype", "")))
-    print(f"  {'runtime':<10} {'precision':<9} {'threads':>7} {'in_tok':>7} "
-          f"{'p50_ms':>9} {'p95_ms':>9} {'p99_ms':>9} {'rps':>8}")
-    print("  " + "-" * 74)
+    gen = latest_per_key(gen, lambda r: (r.get("runtime", ""), r.get("dtype", ""),
+                                         r.get("extra", {}).get("template", ""),
+                                         r.get("extra", {}).get("kv_cache", False)))
+    print(f"  {'runtime':<13} {'precision':<9} {'template':<9} {'threads':>7} "
+          f"{'in_tok':>7} {'p50_ms':>9} {'p95_ms':>9} {'p99_ms':>9} {'rps':>8}")
+    print("  " + "-" * 87)
     for r in gen:
         lat = r["latency"]
-        thr = r.get("extra", {}).get("threads")
-        print(f"  {r.get('runtime',''):<10} {r.get('dtype',''):<9} "
+        ex = r.get("extra", {})
+        thr = ex.get("threads")
+        rt = r.get("runtime", "") + ("+kv" if ex.get("kv_cache") else "")
+        print(f"  {rt:<13} {r.get('dtype',''):<9} "
+              f"{ex.get('template',''):<9} "
               f"{str(thr if thr is not None else 'default'):>7} "
               f"{r.get('input_token_count_median',0):>7} "
               f"{lat['p50_ms']:>9.1f} {lat['p95_ms']:>9.1f} {lat['p99_ms']:>9.1f} "
