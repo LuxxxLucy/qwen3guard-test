@@ -84,9 +84,9 @@ LEDGER+=("PASS  uv sync")
 section "2/6  download weights + Qwen3GuardTest dataset"
 step "download" uv run python scripts/download.py --variants gen stream --sizes 0.6B
 
-section "3/6  export ONNX (fp32, int8, int4)"
+section "3/6  export ONNX (fp32, int8, int4, with-past)"
 step "export onnx" uv run python scripts/export_gen_onnx.py \
-    --model-id "$MODEL_ID" --precisions fp32 int8 int4
+    --model-id "$MODEL_ID" --precisions fp32 int8 int4 --with-past
 
 section "4/6  export OpenVINO (fp32, int8, int4)"
 step "export openvino" uv run python scripts/export_gen_openvino.py \
@@ -112,6 +112,9 @@ gen --runtime pytorch
 gen --runtime onnx     --precision fp32 --artifact "onnx_models/$BASENAME/fp32"
 gen --runtime onnx     --precision int8 --artifact "onnx_models/$BASENAME/int8"
 gen --runtime onnx     --precision int4 --artifact "onnx_models/$BASENAME/int4"
+# ONNX again with the shared system-prompt prefix KV-cached (with-past graph,
+# suffix-only forward per request) — the prefix-cache head-to-head.
+gen --runtime onnx     --precision fp32 --artifact "onnx_models/$BASENAME/withpast" --kv-cache
 gen --runtime openvino --precision fp32 --artifact "ov_models/$BASENAME/fp32"
 gen --runtime openvino --precision int8 --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision int4 --artifact "ov_models/$BASENAME/int4"

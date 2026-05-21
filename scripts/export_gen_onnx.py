@@ -1,20 +1,23 @@
 """Export Qwen3Guard-Gen to ONNX for the CPU L2 forced-prefix benchmark.
 
-The L2 path is ONE forward pass — no decode loop, no KV cache — so the model is
-exported with task `text-generation` (plain forward, no past key/values). This
-is deliberately NOT `text-generation-with-past`: the with-past export trips
-optimum's dummy KV generator on Qwen3 GQA (head_dim 128 != hidden/heads 64),
-and the L2 path never needs a KV cache anyway.
+The default export uses task `text-generation` — one plain forward, no past
+key/values — as fp32 plus optional int8 / int4 weight quantization.
 
-Layout (one `model.onnx` per precision subdir, which `bench_gen_cpu.py --artifact`
+`--with-past` additionally exports a `text-generation-with-past` graph
+(past_key_values.* inputs, present.* outputs). The benchmark's --kv-cache mode
+uses it to precompute the fixed system-prompt prefix KV once and forward only
+the variable suffix per request.
+
+Layout (one `model.onnx` per subdir, which `bench_gen_cpu.py --artifact`
 points at):
 
   onnx_models/Qwen3Guard-Gen-0.6B/
-    fp32/model.onnx     full precision
-    int8/model.onnx     dynamic INT8 weight quantization
-    int4/model.onnx     4-bit blockwise weight quantization (W4, activations fp32)
+    fp32/model.onnx       full precision, no past
+    int8/model.onnx       dynamic INT8 weight quantization
+    int4/model.onnx       4-bit blockwise weight quantization
+    withpast/model.onnx   fp32 with past_key_values (for --kv-cache)
 
-Idempotent: a precision whose model.onnx already exists is skipped.
+Idempotent: a subdir whose model.onnx already exists is skipped.
 """
 from __future__ import annotations
 
@@ -76,6 +79,29 @@ def quantize_int4(src: Path, out: Path) -> None:
     print(f"[export-onnx] int4 done: {out}")
 
 
+def export_withpast(model_id: str, base: Path, opset: int) -> None:
+    """Export a with-past graph — past_key_values.* inputs, present.* outputs —
+    for the benchmark's --kv-cache mode. optimum builds the Qwen3 GQA past
+    shapes (8 KV heads, head_dim 128) correctly."""
+    out = base / "withpast"
+    if (out / "model.onnx").exists():
+        print(f"[export-onnx] with-past already at {out}; skipping.")
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    from optimum.exporters.onnx import main_export
+    print(f"[export-onnx] with-past: {model_id} -> {out} "
+          f"(task=text-generation-with-past, opset={opset})")
+    main_export(
+        model_name_or_path=model_id,
+        output=str(out),
+        task="text-generation-with-past",
+        opset=opset,
+        trust_remote_code=True,
+        no_post_process=True,
+    )
+    print(f"[export-onnx] with-past done: {out}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B")
@@ -86,6 +112,9 @@ def main() -> int:
                     help="Which precisions to produce. int8/int4 quantize the "
                          "fp32 export, which is always built first.")
     ap.add_argument("--opset", type=int, default=17)
+    ap.add_argument("--with-past", action="store_true",
+                    help="Also export a with-past graph (past_key_values.* in, "
+                         "present.* out) for the benchmark's --kv-cache mode.")
     args = ap.parse_args()
 
     base = Path(args.out_dir) if args.out_dir else Path("onnx_models") / Path(args.model_id).name
@@ -97,6 +126,8 @@ def main() -> int:
         quantize_int8(fp32_dir, base / "int8")
     if "int4" in args.precisions:
         quantize_int4(fp32_dir, base / "int4")
+    if args.with_past:
+        export_withpast(args.model_id, base, args.opset)
 
     print(f"[export-onnx] artifacts under {base}/")
     return 0

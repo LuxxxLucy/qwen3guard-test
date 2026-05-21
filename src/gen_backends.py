@@ -12,9 +12,11 @@ that executes the forward:
 
 The exported artifacts are produced by scripts/export_gen_{onnx,openvino,gguf}.py.
 
-The llama.cpp backend also has a system-prompt KV-cache mode (kv_cache=True):
-prime_prefix() evaluates the shared prefix once, then verdict_logits() rewinds
-and evaluates only the variable suffix — the prefix KV is reused, never copied.
+The llama.cpp and ONNX backends have a system-prompt KV-cache mode
+(kv_cache=True): prime_prefix() evaluates the shared prefix once, then
+verdict_logits() forwards only the variable suffix against the cached prefix
+KV. llama.cpp rewinds its context in place; ONNX rebinds the prefix KV through
+an IO binding. Neither re-feeds or copies the prefix per request.
 """
 from __future__ import annotations
 
@@ -121,9 +123,57 @@ class OnnxCPUBackend(GenBackend):
         self.input_names = {i.name for i in self.session.get_inputs()}
         self.output_name = self.session.get_outputs()[0].name
         self.detail = f"onnxruntime {ort.__version__}"
+        if self.kv_cache:
+            self._setup_kv_cache()
+
+    def _setup_kv_cache(self) -> None:
+        """KV-cache mode needs a with-past graph (past_key_values.* inputs).
+        Record the KV-head shape and pre-make the IO binding."""
+        past = sorted(n for n in self.input_names if n.startswith("past_key_values."))
+        if not past:
+            raise SystemExit(
+                "[onnx] --kv-cache needs a with-past export — point --artifact "
+                "at onnx_models/<model>/withpast (export_gen_onnx.py --with-past).")
+        shape = {i.name: i.shape for i in self.session.get_inputs()}[past[0]]
+        self._past_names = past
+        self._present_names = [n.replace("past_key_values", "present") for n in past]
+        self._kv_heads, self._head_dim = shape[1], shape[3]
+        self._io = self.session.io_binding()
+        self._prefix_len = 0
+        self.detail += " +kv-cache"
+
+    def prime_prefix(self, prefix_ids: list[int]) -> None:
+        """Forward the shared prefix once and bind its present-KV as persistent
+        IO-binding inputs. Each per-request suffix forward reuses these bound
+        tensors — the prefix KV is never re-fed or copied per call."""
+        import onnxruntime as ort
+        np = self._np
+        p = len(prefix_ids)
+        empty = np.zeros((1, self._kv_heads, 0, self._head_dim), np.float32)
+        feeds = {"input_ids": np.array([prefix_ids], np.int64),
+                 "attention_mask": np.ones((1, p), np.int64),
+                 "position_ids": np.arange(p, dtype=np.int64)[None, :]}
+        feeds.update({n: empty for n in self._past_names})
+        present = self.session.run(self._present_names, feeds)
+        self._prefix_kv = [ort.OrtValue.ortvalue_from_numpy(kv) for kv in present]
+        for name, ov in zip(self._past_names, self._prefix_kv):
+            self._io.bind_ortvalue_input(name, ov)
+        self._prefix_len = p
 
     def verdict_logits(self, forced_ids: list[int]) -> list[float]:
         np = self._np
+        if self.kv_cache:
+            suffix = forced_ids[self._prefix_len:]
+            total = self._prefix_len + len(suffix)
+            self._io.bind_cpu_input("input_ids", np.array([suffix], np.int64))
+            self._io.bind_cpu_input("attention_mask", np.ones((1, total), np.int64))
+            self._io.bind_cpu_input(
+                "position_ids",
+                np.arange(self._prefix_len, total, dtype=np.int64)[None, :])
+            self._io.bind_output(self.output_name)
+            self.session.run_with_iobinding(self._io)
+            row = self._io.get_outputs()[0].numpy()[0, -1]
+            return [float(row[v]) for v in self.verdict_token_ids]
         arr = np.array([forced_ids], dtype=np.int64)
         feeds = {"input_ids": arr}
         if "attention_mask" in self.input_names:
@@ -225,8 +275,8 @@ def make_backend(runtime: str, precision: str | None,
     if runtime not in _BACKENDS:
         raise SystemExit(f"unknown runtime {runtime!r}; "
                          f"choose from {sorted(_BACKENDS)}")
-    if kv_cache and runtime != "llamacpp":
+    if kv_cache and runtime not in ("llamacpp", "onnx"):
         raise SystemExit(f"--kv-cache is implemented for --runtime llamacpp "
-                         f"only, not {runtime!r}.")
+                         f"and onnx only, not {runtime!r}.")
     prec = precision or DEFAULT_PRECISION[runtime]
     return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache)

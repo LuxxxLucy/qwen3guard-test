@@ -141,9 +141,10 @@ def main() -> int:
                     help="Length sweep (synthetic user-token counts). One "
                          "result file per length. Default: representative.")
     ap.add_argument("--kv-cache", action="store_true",
-                    help="llama.cpp only: precompute the shared system-prompt "
+                    help="llama.cpp / onnx: precompute the shared system-prompt "
                          "prefix KV once, then time only the variable-suffix "
-                         "forward per request — the prefix-cache speedup.")
+                         "forward per request — the prefix-cache speedup. For "
+                         "onnx, point --artifact at the withpast export dir.")
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
                     help="Cross-check verdict argmax against PyTorch-CPU fp32 on "
