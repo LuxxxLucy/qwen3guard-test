@@ -89,15 +89,19 @@ class BenchResult:
         return d
 
 
-def write_result(res: BenchResult, out_dir: Path) -> Path:
-    import torch
+def write_result(res: BenchResult, out_dir: Path, tag: str = "") -> Path:
     from datetime import datetime, timezone
+    try:
+        import torch
+        res.torch_version = torch.__version__
+    except Exception:
+        # CPU runtimes (ONNX / OpenVINO / llama.cpp) need not have torch.
+        res.torch_version = ""
     res.timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     res.host = platform.node()
-    res.torch_version = torch.__version__
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = res.timestamp_utc.replace(":", "").replace("-", "")
-    name = f"bench_{res.variant}_{res.runtime}_{res.device}_{stamp}.json"
+    name = f"bench_{res.variant}_{res.runtime}_{res.device}{tag}_{stamp}.json"
     path = out_dir / name
     path.write_text(json.dumps(res.to_dict(), indent=2))
     return path

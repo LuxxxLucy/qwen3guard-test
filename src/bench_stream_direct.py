@@ -54,12 +54,14 @@ def main() -> int:
     ap.add_argument("--n-prompts", type=int, default=20)
     ap.add_argument("--n-warmup", type=int, default=3)
     ap.add_argument("--user-len", type=int, default=81)
+    ap.add_argument("--device", default=None,
+                    help="Override device (cuda|cpu). Default: cuda if available.")
     args = ap.parse_args()
 
     import torch
     from transformers import AutoModel, AutoTokenizer
 
-    device = pick_device()
+    device = args.device or pick_device()
     dtype = pick_dtype(device)
     print(f"[bench-direct] model={args.model_id} device={device} dtype={dtype}")
 

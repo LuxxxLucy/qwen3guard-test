@@ -1,13 +1,26 @@
 [project]
 name = "qwen3guard-test"
 version = "0.1.0"
-description = "Qwen3Guard latency benchmarks (PyTorch + ONNX, Gen + Stream, batch=1) — CUDA."
+description = "Qwen3Guard latency benchmarks — Gen + Stream, batch=1, GPU (CUDA) and CPU (PyTorch / ONNX Runtime / OpenVINO / llama.cpp)."
 requires-python = ">=3.11"
-# Target: Linux + CUDA. torch comes from the default PyPI channel (cu124 wheel
-# for 2.5.x / 2.6.x). Upper-bounded below 2.7 so we stay on cu124 wheels, which
-# work with NVIDIA drivers reporting CUDA 12.4+ (e.g. driver 12.5 on our box).
-# torch 2.7+ ships cu126, 2.8+ ships cu128 — both need newer drivers.
-# onnxruntime-gpu provides both CUDA and CPU execution providers in one package.
+# torch: GPU target is Linux + CUDA. torch comes from the default PyPI channel
+# (cu124 wheel for 2.5.x / 2.6.x). Upper-bounded below 2.7 to stay on cu124
+# wheels, which work with NVIDIA drivers reporting CUDA 12.4+. torch 2.7+ ships
+# cu126, 2.8+ ships cu128 — both need newer drivers.
+#
+# onnxruntime: the plain CPU wheel, every platform. The CPU benchmark
+# (bench_gen_cpu.py) and the ONNX quantizers need an onnxruntime that loads
+# without CUDA. onnxruntime-gpu's native extension is linked against the CUDA
+# runtime; on a box without a matching CUDA install it fails to import, leaving
+# `import onnxruntime` half-initialized — no SessionOptions, no quantization
+# submodule. The CPU execution provider is identical in both wheels, so the
+# plain wheel is the correct dependency here. The parked GPU ONNX benchmark
+# (src/bench_gen_onnx.py, not wired into any run script) falls back to the CPU
+# provider; benchmarking ONNX on CUDA needs a manual `uv pip install
+# onnxruntime-gpu` swap.
+#
+# CPU runtimes: optimum-intel[openvino] adds the OpenVINO runtime plus NNCF
+# weight compression; llama-cpp-python is the GGUF runtime.
 dependencies = [
     "torch>=2.5,<2.7",
     "transformers>=4.51",
@@ -15,10 +28,12 @@ dependencies = [
     "huggingface-hub>=0.24",
     "numpy",
     "onnx>=1.16",
-    "onnxruntime-gpu>=1.18; sys_platform == 'linux'",
-    "onnxruntime>=1.18; sys_platform != 'linux'",
+    "onnx-ir>=0.1",  # required by onnxruntime's 4-bit (MatMulNBits) quantizer
+    "onnxruntime>=1.18",
     "optimum>=1.22",
     "optimum-onnx>=0.1",
+    "optimum-intel[openvino]>=1.21",
+    "llama-cpp-python>=0.3",
     "accelerate>=0.30",
     "sentencepiece>=0.2",
 ]

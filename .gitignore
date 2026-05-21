@@ -7,8 +7,13 @@ uv.lock.bak
 # benchmark outputs
 results/*.json
 
-# locally exported ONNX weights (can be regenerated via scripts/)
+# locally exported model artifacts (can be regenerated via scripts/)
 onnx_models/
+ov_models/
+gguf_models/
+
+# shallow clone of llama.cpp used by scripts/export_gen_gguf.py
+vendor/
 
 # HF cache lives in ~/.cache/huggingface by default; ignore any stray local copies
 hf_cache/
