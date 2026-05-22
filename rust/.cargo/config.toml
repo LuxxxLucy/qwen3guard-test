@@ -1,0 +1,7 @@
+# Compile candle and this crate for the CPU running the build. Plain
+# `cargo build --release` targets the baseline ISA (x86-64-v1 / baseline
+# ARMv8); candle's CPU kernels then skip AVX2 / AVX-512 / the ARM dot-product
+# extensions and run several times slower. target-cpu=native resolves per
+# build host, so the 5800X and the Kunpeng 920 each get their own ISA.
+[build]
+rustflags = ["-C", "target-cpu=native"]

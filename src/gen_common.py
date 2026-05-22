@@ -104,6 +104,26 @@ def build_forced_ids(tokenizer, user_text: str, template: str = "original") -> l
     return forced_ids
 
 
+def build_plain_ids(tokenizer, user_text: str, template: str = "original") -> list[int]:
+    """Token sequence for the plain rendered prompt, no trailing "Safety: " —
+    the L0 decode-loop input."""
+    return tokenizer.encode(
+        render_prompt(tokenizer, user_text, template), add_special_tokens=False
+    )
+
+
+def common_prefix(seqs: list[list[int]]) -> list[int]:
+    """Longest leading token run shared by every sequence, capped one short of
+    the shortest so each sequence keeps a non-empty suffix. The KV-cache path
+    primes this shared prefix once and forwards only each suffix."""
+    first = seqs[0]
+    limit = min(len(s) for s in seqs) - 1
+    p = 0
+    while p < limit and all(s[p] == first[p] for s in seqs):
+        p += 1
+    return first[:p]
+
+
 def discover_verdict_token_ids(tokenizer, template: str = "original") -> dict[str, int]:
     """Discover the 3 verdict token ids (Safe / Unsafe / Controversial).
 

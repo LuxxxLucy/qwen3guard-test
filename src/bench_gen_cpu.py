@@ -14,10 +14,10 @@ Examples:
   uv run python src/bench_gen_cpu.py --runtime pytorch
   uv run python src/bench_gen_cpu.py --runtime onnx     --precision int8 \\
       --artifact onnx_models/Qwen3Guard-Gen-0.6B/int8
-  uv run python src/bench_gen_cpu.py --runtime openvino --precision int4 \\
-      --artifact ov_models/Qwen3Guard-Gen-0.6B/int4
-  uv run python src/bench_gen_cpu.py --runtime llamacpp --precision q4_k_m \\
-      --artifact gguf_models/Qwen3Guard-Gen-0.6B.q4_k_m.gguf
+  uv run python src/bench_gen_cpu.py --runtime openvino --precision int8 \\
+      --artifact ov_models/Qwen3Guard-Gen-0.6B/int8
+  uv run python src/bench_gen_cpu.py --runtime llamacpp --precision q8_0 \\
+      --artifact gguf_models/Qwen3Guard-Gen-0.6B.q8_0.gguf
 """
 from __future__ import annotations
 
@@ -30,56 +30,50 @@ from bench_common import (
     BenchResult, LatencyStats, load_representative_texts, synthesize_prompts,
     warmup_and_measure, write_result,
 )
-from gen_backends import PROVIDER_TAG, make_backend
-from gen_common import VERDICT_LABELS, build_forced_ids, discover_verdict_token_ids
+from gen_backends import (
+    L0_MAX_NEW_TOKENS, PROVIDER_TAG, PyTorchCPUBackend, make_backend,
+)
+from gen_common import (
+    TEMPLATES, VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
+    discover_verdict_token_ids,
+)
 
 
 def build_samples(tok, n_samples: int, length: int | None,
-                  template: str) -> list[list[int]]:
-    """Return n forced-prefix token sequences. `length` None = representative
-    dataset samples; otherwise synthetic prompts of that user-token length.
-    `template` selects the system-prompt block (see gen_common.render_prompt)."""
+                  template: str, unoptimized: bool) -> list[list[int]]:
+    """Return n input token sequences for one (length, template) cell.
+    `length` None = representative dataset samples; otherwise synthetic prompts
+    of that user-token length. `template` selects the system-prompt block.
+    L2 (default): forced-prefix ids = tokenize(render + "Safety: "). L0
+    (unoptimized): the plain rendered prompt, no trailing "Safety: "."""
     if length is None:
         texts = load_representative_texts(max_samples=n_samples, tokenizer=tok)
     else:
         texts = synthesize_prompts(tok, target_tokens=length, n=n_samples, seed=length)
+    if unoptimized:
+        return [build_plain_ids(tok, t, template) for t in texts]
     return [build_forced_ids(tok, t, template) for t in texts]
 
 
-def common_prefix(sample_pools: dict) -> list[int]:
-    """Longest leading token sequence shared by every sample across all pools —
-    KV-cache mode primes this once and evaluates only each sample's suffix.
-    Capped one short of the shortest sample so every suffix is non-empty."""
-    samples = [s for pool in sample_pools.values() for s in pool]
-    first = samples[0]
-    limit = min(len(s) for s in samples) - 1
-    p = 0
-    while p < limit and all(s[p] == first[p] for s in samples):
-        p += 1
-    return first[:p]
-
-
-def verify_against_pytorch(model_id: str, backend, samples: list[list[int]],
-                           verdict_token_ids: list[int]) -> None:
+def verify_against_pytorch(ref, backend, samples: list[list[int]]) -> None:
     """Cross-check: the runtime under test should produce the same verdict
-    argmax as PyTorch-CPU fp32. Quantization may flip a borderline sample, so
-    this reports agreement rather than asserting — a low count is a warning,
-    not a crash."""
-    from gen_backends import PyTorchCPUBackend
-    ref = PyTorchCPUBackend("fp32", verdict_token_ids, threads=None)
-    ref.load(model_id, None, max_seq_len=max(len(s) for s in samples))
+    argmax as the PyTorch-CPU fp32 reference. Quantization may flip a borderline
+    sample, so this reports agreement rather than asserting — a low count is a
+    warning, not a crash."""
     probe = samples[:10]
     agree = sum(ref.predict(s) == backend.predict(s) for s in probe)
     tag = "OK" if agree == len(probe) else "DRIFT"
     print(f"[verify] verdict-argmax agreement vs pytorch-cpu fp32: "
           f"{agree}/{len(probe)}  {tag}")
-    del ref
 
 
-def run_cell(backend, samples: list[list[int]], args, length: int | None) -> None:
+def run_cell(backend, samples: list[list[int]], args, length: int | None,
+             template: str) -> None:
     median_tokens = int(statistics.median(len(s) for s in samples))
     lat = warmup_and_measure(backend.predict, samples, args.n_warmup, device="cpu")
     mode = "representative" if length is None else f"sweep-len{length}"
+    opt_level = "L0" if args.unoptimized else "L2"
+    output_token_count = L0_MAX_NEW_TOKENS if args.unoptimized else 1
     res = BenchResult(
         variant="gen",
         runtime=backend.runtime,
@@ -90,28 +84,29 @@ def run_cell(backend, samples: list[list[int]], args, length: int | None) -> Non
         n_samples=len(lat),
         n_warmup=args.n_warmup,
         input_token_count_median=median_tokens,
-        output_token_count=1,
+        output_token_count=output_token_count,
         latency=LatencyStats.from_samples(lat),
         extra={
             "mode": mode,
-            "opt_level": "L2",
+            "opt_level": opt_level,
             "runtime": backend.runtime,
             "precision": backend.precision,
             "threads": args.threads,
             "runtime_detail": backend.detail,
             "target_user_tokens": length,
-            "template": args.template,
+            "template": template,
             "kv_cache": args.kv_cache,
         },
     )
-    tag = f"_{backend.precision}_{args.template}"
+    tag = f"_{backend.precision}_{template}_{opt_level}"
     if args.kv_cache:
         tag += "_kvcache"
     path = write_result(res, Path(args.out_dir), tag=tag)
     lt = res.latency
-    print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {mode} "
-          f"len={median_tokens}  p50={lt.p50_ms:.1f}ms p95={lt.p95_ms:.1f}ms "
-          f"p99={lt.p99_ms:.1f}ms thr={lt.throughput_rps:.2f} rps")
+    print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {opt_level} "
+          f"{template} {mode} len={median_tokens}  p50={lt.p50_ms:.1f}ms "
+          f"p95={lt.p95_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
+          f"thr={lt.throughput_rps:.2f} rps")
     print(f"[bench-gen-cpu] wrote {path}")
 
 
@@ -120,15 +115,18 @@ def main() -> int:
     ap.add_argument("--runtime", required=True,
                     choices=["pytorch", "onnx", "openvino", "llamacpp"])
     ap.add_argument("--precision", default=None,
-                    help="fp32|int8|int4 (onnx/openvino); f16|q8_0|q4_k_m "
-                         "(llamacpp). Default: the runtime's full precision.")
+                    help="fp32|int8 (onnx/openvino); f16|q8_0 (llamacpp). "
+                         "Default: the runtime's full precision.")
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B",
                     help="Source HF id — tokenizer + pytorch weights + tagging.")
-    ap.add_argument("--template", default="original", choices=["original", "test-200"],
-                    help="Input template. original: the model's built-in "
-                         "Qwen3Guard prompt (~296-token overhead). test-200: a "
-                         "compressed policy (~130-token overhead) so a "
-                         "representative input lands near 200 total tokens.")
+    ap.add_argument("--template", nargs="+", default=list(TEMPLATES),
+                    choices=list(TEMPLATES),
+                    help="Input template(s). One invocation benchmarks every "
+                         "listed template, reusing the loaded backend. "
+                         "original: the model's built-in Qwen3Guard prompt "
+                         "(~296-token overhead). test-200: a compressed policy "
+                         "(~130-token overhead) so a representative input lands "
+                         "near 200 total tokens.")
     ap.add_argument("--artifact", default=None,
                     help="Exported-model path: ONNX export dir, OpenVINO export "
                          "dir, or .gguf file. Required for non-pytorch runtimes.")
@@ -145,6 +143,12 @@ def main() -> int:
                          "prefix KV once, then time only the variable-suffix "
                          "forward per request — the prefix-cache speedup. For "
                          "onnx, point --artifact at the withpast export dir.")
+    ap.add_argument("--unoptimized", action="store_true",
+                    help="L0 mode: time the model-card greedy generate() decode "
+                         "loop (max_new_tokens=32) over the plain rendered "
+                         "prompt instead of the L2 single forced-prefix "
+                         "forward. Implemented for pytorch/openvino/llamacpp; "
+                         "the cross-runtime verify is skipped.")
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
                     help="Cross-check verdict argmax against PyTorch-CPU fp32 on "
@@ -165,32 +169,45 @@ def main() -> int:
 
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model_id)
-    verdict_ids = discover_verdict_token_ids(tok, args.template)
+    # Verdict token ids are prompt-independent (the "Safety: " boundary is
+    # fixed text), so one probe serves every template; the first suffices.
+    verdict_ids = discover_verdict_token_ids(tok, args.template[0])
     verdict_token_ids = [verdict_ids[v] for v in VERDICT_LABELS]
     print(f"[bench-gen-cpu] model={args.model_id} runtime={args.runtime} "
-          f"template={args.template} verdict_token_ids={dict(verdict_ids)}")
+          f"templates={args.template} opt_level={'L0' if args.unoptimized else 'L2'} "
+          f"verdict_token_ids={dict(verdict_ids)}")
 
     cells: list[int | None] = list(args.lengths) if args.lengths else [None]
-    sample_pools = {L: build_samples(tok, args.n_samples, L, args.template) for L in cells}
+    # sample pools indexed by (template, length); built once, reused per cell.
+    sample_pools = {
+        (tmpl, L): build_samples(tok, args.n_samples, L, tmpl, args.unoptimized)
+        for tmpl in args.template for L in cells
+    }
     max_seq_len = max(len(s) for pool in sample_pools.values() for s in pool)
 
     backend = make_backend(args.runtime, args.precision, verdict_token_ids,
-                           args.threads, args.kv_cache)
+                           args.threads, args.kv_cache, args.unoptimized)
     backend.load(args.model_id, args.artifact, max_seq_len)
     print(f"[bench-gen-cpu] backend loaded: {backend.detail}")
 
-    if args.kv_cache:
-        prefix = common_prefix(sample_pools)
-        backend.prime_prefix(prefix)
-        print(f"[bench-gen-cpu] kv-cache primed: shared prefix = {len(prefix)} "
-              f"tokens (suffix-only forward per request)")
+    # PyTorch-CPU fp32 reference for the cross-runtime verdict check — loaded
+    # once and reused across templates (the model is template-independent).
+    ref = None
+    if args.verify and args.runtime != "pytorch" and not args.unoptimized:
+        ref = PyTorchCPUBackend("fp32", verdict_token_ids, threads=None)
+        ref.load(args.model_id, None, max_seq_len)
 
-    if args.verify and args.runtime != "pytorch":
-        verify_against_pytorch(args.model_id, backend,
-                               sample_pools[cells[0]], verdict_token_ids)
-
-    for L in cells:
-        run_cell(backend, sample_pools[L], args, L)
+    for tmpl in args.template:
+        tmpl_pools = {L: sample_pools[(tmpl, L)] for L in cells}
+        if args.kv_cache:
+            prefix = common_prefix([s for pool in tmpl_pools.values() for s in pool])
+            backend.prime_prefix(prefix)
+            print(f"[bench-gen-cpu] kv-cache primed [{tmpl}]: shared prefix = "
+                  f"{len(prefix)} tokens (suffix-only forward per request)")
+        if ref is not None:
+            verify_against_pytorch(ref, backend, tmpl_pools[cells[0]])
+        for L in cells:
+            run_cell(backend, tmpl_pools[L], args, L, tmpl)
     return 0
 
 

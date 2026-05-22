@@ -44,3 +44,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.uv]
+# Build llama-cpp-python from source so llama.cpp/ggml compiles with
+# -march=native (GGML_NATIVE defaults on for a source build). The prebuilt
+# wheel is generic — no AVX2 / ARM dot-product — and benchmarks 5-7x slow.
+no-binary-package = ["llama-cpp-python"]

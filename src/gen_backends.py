@@ -23,6 +23,10 @@ from __future__ import annotations
 from pathlib import Path
 
 
+# L0 unoptimized mode: greedy generate() decode loop of this many tokens.
+L0_MAX_NEW_TOKENS = 32
+
+
 # Default precision tag when --precision is not given, per runtime.
 DEFAULT_PRECISION = {
     "pytorch": "fp32",
@@ -46,11 +50,13 @@ class GenBackend:
     runtime = "base"
 
     def __init__(self, precision: str, verdict_token_ids: list[int],
-                 threads: int | None, kv_cache: bool = False):
+                 threads: int | None, kv_cache: bool = False,
+                 unoptimized: bool = False):
         self.precision = precision
         self.verdict_token_ids = verdict_token_ids
         self.threads = threads
         self.kv_cache = kv_cache
+        self.unoptimized = unoptimized
         self.detail = ""  # runtime/version string for the result JSON
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
@@ -66,11 +72,21 @@ class GenBackend:
         verdict_logits can reuse it. Only the llama.cpp backend implements it."""
         raise NotImplementedError(f"{self.runtime} backend has no KV-cache mode")
 
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        """L0 unoptimized mode: greedy generate() decode loop of
+        L0_MAX_NEW_TOKENS tokens — the model-card path. The full decode is the
+        timed unit; the return value is unused (L0 skips the verify check)."""
+        raise NotImplementedError(f"{self.runtime} backend has no L0 mode")
+
     def predict(self, forced_ids: list[int]) -> int:
-        """One L2 forward plus the restricted 3-way argmax — the timed unit of
-        work. Returns the verdict index (0=Safe, 1=Unsafe, 2=Controversial);
-        bench_common.warmup_and_measure ignores the return, the cross-runtime
-        verify check uses it."""
+        """The timed unit of work. In L2 mode (default): one forward over
+        `forced_ids` plus the restricted 3-way argmax — returns the verdict
+        index (0=Safe, 1=Unsafe, 2=Controversial). In L0 unoptimized mode:
+        a greedy decode loop over `forced_ids` (the plain prompt); returns 0,
+        bench_gen_cpu skips the verify check.
+        bench_common.warmup_and_measure ignores the return either way."""
+        if self.unoptimized:
+            return self.decode_l0(forced_ids)
         lg = self.verdict_logits(forced_ids)
         return lg.index(max(lg))
 
@@ -97,6 +113,17 @@ class PyTorchCPUBackend(GenBackend):
                              use_cache=False)
         row = out.logits[0, -1]
         return [float(row[v]) for v in self.verdict_token_ids]
+
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        torch = self._torch
+        t = torch.tensor([plain_ids], dtype=torch.long)
+        with torch.no_grad():
+            self.model.generate(
+                input_ids=t, attention_mask=torch.ones_like(t),
+                max_new_tokens=L0_MAX_NEW_TOKENS, do_sample=False, num_beams=1,
+                use_cache=True,
+            )
+        return 0
 
 
 class OnnxCPUBackend(GenBackend):
@@ -210,6 +237,15 @@ class OpenVINOCPUBackend(GenBackend):
         row = out.logits[0, -1]
         return [float(row[v]) for v in self.verdict_token_ids]
 
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        torch = self._torch
+        t = torch.tensor([plain_ids], dtype=torch.long)
+        self.model.generate(
+            input_ids=t, attention_mask=torch.ones_like(t),
+            max_new_tokens=L0_MAX_NEW_TOKENS, do_sample=False, num_beams=1,
+        )
+        return 0
+
 
 class LlamaCppBackend(GenBackend):
     runtime = "llamacpp"
@@ -260,6 +296,20 @@ class LlamaCppBackend(GenBackend):
         row = self._get_logits(self._ctx, -1)
         return [float(row[v]) for v in self.verdict_token_ids]
 
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        """L0: native greedy decode loop. Eval the prompt once, then for each
+        of L0_MAX_NEW_TOKENS steps take the argmax of the last-position logits
+        and eval it back in — the model-card autoregressive path."""
+        import numpy as np
+        self.llm.reset()
+        self.llm.eval(plain_ids)
+        n_vocab = self.llm.n_vocab()
+        for _ in range(L0_MAX_NEW_TOKENS):
+            row = self._get_logits(self._ctx, -1)
+            logits = np.ctypeslib.as_array(row, shape=(n_vocab,))
+            self.llm.eval([int(logits.argmax())])
+        return 0
+
 
 _BACKENDS = {
     "pytorch": PyTorchCPUBackend,
@@ -271,12 +321,17 @@ _BACKENDS = {
 
 def make_backend(runtime: str, precision: str | None,
                  verdict_token_ids: list[int], threads: int | None,
-                 kv_cache: bool = False) -> GenBackend:
+                 kv_cache: bool = False, unoptimized: bool = False) -> GenBackend:
     if runtime not in _BACKENDS:
         raise SystemExit(f"unknown runtime {runtime!r}; "
                          f"choose from {sorted(_BACKENDS)}")
     if kv_cache and runtime not in ("llamacpp", "onnx"):
         raise SystemExit(f"--kv-cache is implemented for --runtime llamacpp "
                          f"and onnx only, not {runtime!r}.")
+    if unoptimized and runtime == "onnx":
+        raise SystemExit("--unoptimized (L0 generate() decode loop) is "
+                         "implemented for pytorch, openvino, llamacpp only, "
+                         "not onnx.")
     prec = precision or DEFAULT_PRECISION[runtime]
-    return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache)
+    return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache,
+                              unoptimized)
