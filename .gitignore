@@ -24,3 +24,7 @@ hf_cache/
 
 # Local project status/notes (not part of the shipped artifact)
 status.md
+
+# kernels/ — code (*.sh, *.py) is tracked; docs and profiling output are local
+kernels/*.md
+kernels/profile/

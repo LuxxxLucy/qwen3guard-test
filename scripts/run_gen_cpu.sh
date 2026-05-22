@@ -66,15 +66,17 @@ echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  
 section "1/8  uv sync (llama-cpp-python built from source)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
-# pyproject makes the rebuild native; --reinstall-package forces it even when a
-# wheel is already installed, which a plain `uv sync` would keep.
-# CMAKE_ARGS adds a BLAS backend for the fp16/fp32 prefill GEMM — Accelerate on
-# macOS, OpenBLAS on Linux (apt: libopenblas-dev) — the f16 GGUF fast path.
+# pyproject makes the build native. uv keys its build cache by source-dist
+# hash, not by CMAKE_ARGS, so a cached wheel is reused even with different
+# flags — `uv cache clean` evicts it so the rebuild actually honors CMAKE_ARGS.
+# GGML_NATIVE builds for the host CPU; CMAKE_ARGS adds a BLAS backend for the
+# fp16/fp32 prefill GEMM — Accelerate on macOS, OpenBLAS on Linux.
 if [[ "$(uname)" == "Darwin" ]]; then
-    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple -DGGML_NATIVE=ON"
 else
-    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON"
 fi
+uv cache clean llama-cpp-python
 uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
 LEDGER+=("PASS  uv sync")
