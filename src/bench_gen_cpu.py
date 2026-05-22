@@ -39,6 +39,15 @@ from gen_common import (
 )
 
 
+def opt_level_of(args) -> str:
+    """Result-JSON opt_level tag for this run's mode: L0 (generate decode
+    loop), L2 (forced-prefix forward), or L2-lastpos (forced-prefix forward
+    with the output projection restricted to the last position)."""
+    if args.unoptimized:
+        return "L0"
+    return "L2-lastpos" if args.last_pos_logits else "L2"
+
+
 def build_samples(tok, n_samples: int, length: int | None,
                   template: str, unoptimized: bool) -> list[list[int]]:
     """Return n input token sequences for one (length, template) cell.
@@ -72,7 +81,7 @@ def run_cell(backend, samples: list[list[int]], args, length: int | None,
     median_tokens = int(statistics.median(len(s) for s in samples))
     lat = warmup_and_measure(backend.predict, samples, args.n_warmup, device="cpu")
     mode = "representative" if length is None else f"sweep-len{length}"
-    opt_level = "L0" if args.unoptimized else "L2"
+    opt_level = opt_level_of(args)
     output_token_count = L0_MAX_NEW_TOKENS if args.unoptimized else 1
     res = BenchResult(
         variant="gen",
@@ -149,6 +158,14 @@ def main() -> int:
                          "prompt instead of the L2 single forced-prefix "
                          "forward. Implemented for pytorch/openvino/llamacpp; "
                          "the cross-runtime verify is skipped.")
+    ap.add_argument("--last-pos-logits", action="store_true",
+                    help="pytorch only: compute the output projection (token "
+                         "logits) for the last position only. The L2 path "
+                         "reads just that row, so projecting the prompt "
+                         "positions is wasted. Off: the full-sequence "
+                         "projection — the before-row for this comparison. "
+                         "onnx/openvino bake this into the export; llama.cpp "
+                         "always does it.")
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
                     help="Cross-check verdict argmax against PyTorch-CPU fp32 on "
@@ -174,7 +191,7 @@ def main() -> int:
     verdict_ids = discover_verdict_token_ids(tok, args.template[0])
     verdict_token_ids = [verdict_ids[v] for v in VERDICT_LABELS]
     print(f"[bench-gen-cpu] model={args.model_id} runtime={args.runtime} "
-          f"templates={args.template} opt_level={'L0' if args.unoptimized else 'L2'} "
+          f"templates={args.template} opt_level={opt_level_of(args)} "
           f"verdict_token_ids={dict(verdict_ids)}")
 
     cells: list[int | None] = list(args.lengths) if args.lengths else [None]
@@ -186,7 +203,8 @@ def main() -> int:
     max_seq_len = max(len(s) for pool in sample_pools.values() for s in pool)
 
     backend = make_backend(args.runtime, args.precision, verdict_token_ids,
-                           args.threads, args.kv_cache, args.unoptimized)
+                           args.threads, args.kv_cache, args.unoptimized,
+                           args.last_pos_logits)
     backend.load(args.model_id, args.artifact, max_seq_len)
     print(f"[bench-gen-cpu] backend loaded: {backend.detail}")
 

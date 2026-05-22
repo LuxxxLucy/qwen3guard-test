@@ -14,6 +14,8 @@
 #   L0 — naive:               no prefix cache, no forced prefix, no compile
 #   L1 — + prefix cache       (template head KV reused across calls)
 #   L2 — + forced-prefix      (teacher-force "Safety: ", single forward)
+#   L2-lastpos — + last-pos-logits  (output projection over the last position
+#                             only; the verdict readout reads just that row)
 #   L3 — + torch.compile      (CUDA-only, mode=reduce-overhead)
 #
 # With LP and L0 measured at each sweep length, the per-token decode cost
@@ -86,10 +88,11 @@ run_level () {
 run_level "LP" "--prefill-only    --no-prefix-cache  --no-forced-prefix --no-compile"
 run_level "L0" "--no-prefix-cache --no-forced-prefix --no-compile"
 run_level "L1" "--prefix-cache    --no-forced-prefix --no-compile"
-run_level "L2" "--prefix-cache    --forced-prefix    --no-compile"
+run_level "L2"         "--prefix-cache --forced-prefix --no-last-pos-logits --no-compile"
+run_level "L2-lastpos" "--prefix-cache --forced-prefix --last-pos-logits    --no-compile"
 
 if [[ "$DEVICE" == "cuda" ]]; then
-    run_level "L3" "--prefix-cache    --forced-prefix    --compile"
+    run_level "L3" "--prefix-cache --forced-prefix --last-pos-logits --compile"
 else
     echo ""
     echo "[run_optim_ladder_gen] skipping L3 on $DEVICE: torch.compile is CUDA-primary"

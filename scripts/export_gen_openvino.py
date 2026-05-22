@@ -20,8 +20,61 @@ and read the Linux x86 run for the real comparison.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+
+def slice_lm_head_last_position(xml_path: Path) -> None:
+    """Restrict the lm_head matmul to the last sequence position only.
+
+    The IR projects every prompt position to the 151,936-vocab logits, but the
+    L2 path reads only the last position — ~199/200 of that matmul is wasted.
+    This inserts a Slice on the lm_head MatMul's hidden-state input keeping just
+    the last position (axis=1), so the IR emits logits of shape [batch, 1, vocab].
+    Generation reads only the last position per step, so this stays correct for
+    the L0 generate() path too. The lm_head MatMul exists in the fp32 / int8 /
+    int4 IRs regardless of weight quantization, so this applies to all three.
+
+    The edited IR is saved to a sibling temp path, then atomically swapped in:
+    save_model truncates and rewrites the .bin, and the model's weight constants
+    are lazily mmap'd from that same .bin — overwriting it in place reads from a
+    truncated mapping and crashes (SIGBUS). Writing a fresh file sidesteps that.
+    """
+    import openvino as ov
+    from openvino import opset13 as opset
+
+    core = ov.Core()
+    model = core.read_model(str(xml_path))
+
+    matmul = None
+    for op in model.get_ops():
+        name = op.get_friendly_name()
+        if "lm_head" in name and "MatMul" in name:
+            matmul = op
+            break
+    if matmul is None:
+        raise SystemExit(f"[export-ov] lm_head MatMul not found in {xml_path}")
+
+    hidden = matmul.input(0).get_source_output()  # [?, ?, hidden_dim]
+    # Slice axis=1 (sequence), start=-1, stop=INT_MAX, step=1 -> keep last position.
+    start = opset.constant([-1], dtype=ov.Type.i32)
+    stop = opset.constant([2**31 - 1], dtype=ov.Type.i32)
+    step = opset.constant([1], dtype=ov.Type.i32)
+    axis = opset.constant([1], dtype=ov.Type.i32)
+    sliced = opset.slice(hidden, start, stop, step, axis)
+    matmul.input(0).replace_source_output(sliced.output(0))
+
+    model.validate_nodes_and_infer_types()
+
+    xml_path = xml_path.resolve()
+    tmp_xml = xml_path.with_suffix(".sliced.xml")
+    tmp_bin = tmp_xml.with_suffix(".bin")
+    ov.save_model(model, str(tmp_xml))
+    del model  # drop the mmap on the original .bin before overwriting it
+    os.replace(tmp_xml, xml_path)
+    os.replace(tmp_bin, xml_path.with_suffix(".bin"))
+    print(f"[export-ov] lm_head sliced to last position: {xml_path}")
 
 
 def export_one(model_id: str, out: Path, precision: str) -> None:
@@ -45,6 +98,7 @@ def export_one(model_id: str, out: Path, precision: str) -> None:
         model_id, export=True, trust_remote_code=True, quantization_config=qcfg,
     )
     model.save_pretrained(str(out))
+    slice_lm_head_last_position(out / "openvino_model.xml")
     print(f"[export-ov] {precision} done: {out}")
 
 

@@ -24,7 +24,12 @@ Measures batch=1 classification latency under the following modes:
      restricted 3-way compare over {Safe, Unsafe, Controversial} logits
      at the last position. ONE forward pass, no decode loop.
 
-  L3 (--prefix-cache --forced-prefix --compile):
+  L2-lastpos (--prefix-cache --forced-prefix --last-pos-logits):
+     L2 with the output projection (token logits) computed for the last
+     position only (logits_to_keep=1). The verdict readout reads just
+     that row, so projecting the ~200 prompt positions is wasted.
+
+  L3 (--prefix-cache --forced-prefix --last-pos-logits --compile):
      Wrap model.forward in torch.compile (mode='reduce-overhead',
      dynamic=True). Fuses kernels and eliminates per-step Python overhead
      on CUDA.
@@ -382,7 +387,8 @@ def startup_correctness_check(tok, model, head_ids, template_cache, device,
 
 def make_step(model, tok, device, use_prefix_cache, template_cache, T_head,
               use_forced_prefix, max_new_tokens, compile_enabled: bool = False,
-              verdict_token_ids_tensor=None, prefill_only: bool = False):
+              verdict_token_ids_tensor=None, prefill_only: bool = False,
+              last_pos_logits: bool = False):
     """Return a step function that runs ONE classification for the timer.
     Dispatches to the right combination of optimizations based on flags.
 
@@ -421,6 +427,7 @@ def make_step(model, tok, device, use_prefix_cache, template_cache, T_head,
                 input_ids=full_tensor,
                 attention_mask=torch.ones_like(full_tensor),
                 use_cache=False,
+                logits_to_keep=1 if last_pos_logits else 0,
             )
             _restricted_read(out)
 
@@ -470,6 +477,7 @@ def make_step(model, tok, device, use_prefix_cache, template_cache, T_head,
                 past_key_values=cache_copy,
                 cache_position=cache_position,
                 use_cache=False,
+                logits_to_keep=1 if last_pos_logits else 0,
             )
             _restricted_read(out)
 
@@ -482,6 +490,7 @@ def make_step(model, tok, device, use_prefix_cache, template_cache, T_head,
                 input_ids=full_tensor,
                 attention_mask=torch.ones_like(full_tensor),
                 use_cache=False,
+                logits_to_keep=1 if last_pos_logits else 0,
             )
             _restricted_read(out)
 
@@ -513,6 +522,12 @@ def main() -> int:
                     default=False,
                     help="L2: Teacher-force 'Safety: ' so only ONE forward pass "
                          "is needed to read the Safe/Unsafe verdict. Default off.")
+    ap.add_argument("--last-pos-logits", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="L2-lastpos: compute the output projection (token "
+                         "logits) for the last position only (logits_to_keep=1)."
+                         " The verdict readout reads just that row, so "
+                         "projecting the prompt positions is wasted. Default off.")
     ap.add_argument("--compile", action=argparse.BooleanOptionalAction,
                     default=False,
                     help="L3: Wrap model.forward in torch.compile. CUDA-targeted. "
@@ -537,6 +552,7 @@ def main() -> int:
         args.forced_prefix = False
         args.prefix_cache = False
         args.compile = False
+        args.last_pos_logits = False
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -546,6 +562,7 @@ def main() -> int:
 
     opt_summary = (f"prefix_cache={args.prefix_cache} "
                    f"forced_prefix={args.forced_prefix} "
+                   f"last_pos_logits={args.last_pos_logits} "
                    f"compile={args.compile} "
                    f"prefill_only={args.prefill_only}")
     print(f"[bench-gen-pt] model={args.model_id} device={device} dtype={dtype} "
@@ -626,11 +643,13 @@ def main() -> int:
         compile_enabled=args.compile,
         verdict_token_ids_tensor=verdict_token_ids_tensor,
         prefill_only=args.prefill_only,
+        last_pos_logits=args.last_pos_logits,
     )
 
     opt_tag = args.opt_level or (
         "LP" if args.prefill_only else
         "L3" if args.compile else
+        "L2-lastpos" if (args.forced_prefix and args.last_pos_logits) else
         "L2" if args.forced_prefix else
         "L1" if args.prefix_cache else
         "L0"
@@ -703,6 +722,7 @@ def main() -> int:
                        "chat_template_applied": True,
                        "prefix_cache": args.prefix_cache,
                        "forced_prefix": args.forced_prefix,
+                       "last_pos_logits": args.last_pos_logits,
                        "compile": args.compile,
                        "prefill_only": args.prefill_only},
             )
@@ -754,6 +774,7 @@ def main() -> int:
                    "chat_template_applied": True,
                    "prefix_cache": args.prefix_cache,
                    "forced_prefix": args.forced_prefix,
+                   "last_pos_logits": args.last_pos_logits,
                    "compile": args.compile,
                    "prefill_only": args.prefill_only},
         )

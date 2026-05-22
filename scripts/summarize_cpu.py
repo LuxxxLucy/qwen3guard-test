@@ -15,6 +15,7 @@ from pathlib import Path
 ROWS: list[tuple[tuple[str, str, str, bool], str]] = [
     (("pytorch",     "fp32",   "L0", False), "pytorch (L0)"),
     (("pytorch",     "fp32",   "L2", False), "pytorch (L2)"),
+    (("pytorch",     "fp32",   "L2-lastpos", False), "pytorch (L2 last-pos)"),
     (("onnx",        "fp32",   "L2", False), "onnx fp32"),
     (("onnx",        "int8",   "L2", False), "onnx int8"),
     (("onnx",        "fp32",   "L2", True),  "onnx fp32 +kv"),

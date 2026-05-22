@@ -111,7 +111,11 @@ gen() {
     echo
 }
 # Each cell runs both templates (original, test-200) internally.
+# pytorch runs the L2 forced-prefix forward both ways: the full-sequence
+# output projection, then --last-pos-logits restricting it to the last
+# position. onnx/openvino bake that restriction into the export.
 gen --runtime pytorch  --precision fp32
+gen --runtime pytorch  --precision fp32  --last-pos-logits
 gen --runtime pytorch  --precision fp32  --unoptimized
 gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/fp32"
 gen --runtime onnx     --precision int8  --artifact "onnx_models/$BASENAME/int8"

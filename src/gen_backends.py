@@ -51,12 +51,13 @@ class GenBackend:
 
     def __init__(self, precision: str, verdict_token_ids: list[int],
                  threads: int | None, kv_cache: bool = False,
-                 unoptimized: bool = False):
+                 unoptimized: bool = False, last_pos_logits: bool = False):
         self.precision = precision
         self.verdict_token_ids = verdict_token_ids
         self.threads = threads
         self.kv_cache = kv_cache
         self.unoptimized = unoptimized
+        self.last_pos_logits = last_pos_logits
         self.detail = ""  # runtime/version string for the result JSON
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
@@ -109,8 +110,13 @@ class PyTorchCPUBackend(GenBackend):
         torch = self._torch
         t = torch.tensor([forced_ids], dtype=torch.long)
         with torch.no_grad():
+            # last_pos_logits: logits_to_keep=1 projects only the last position
+            # to the 151,936 vocab. The L2 path reads just that row, so
+            # projecting the prompt positions is wasted. Off => logits_to_keep=0
+            # (the full-sequence projection), kept as the benchmark's before-row.
             out = self.model(input_ids=t, attention_mask=torch.ones_like(t),
-                             use_cache=False)
+                             use_cache=False,
+                             logits_to_keep=1 if self.last_pos_logits else 0)
         row = out.logits[0, -1]
         return [float(row[v]) for v in self.verdict_token_ids]
 
@@ -325,7 +331,8 @@ _BACKENDS = {
 
 def make_backend(runtime: str, precision: str | None,
                  verdict_token_ids: list[int], threads: int | None,
-                 kv_cache: bool = False, unoptimized: bool = False) -> GenBackend:
+                 kv_cache: bool = False, unoptimized: bool = False,
+                 last_pos_logits: bool = False) -> GenBackend:
     if runtime not in _BACKENDS:
         raise SystemExit(f"unknown runtime {runtime!r}; "
                          f"choose from {sorted(_BACKENDS)}")
@@ -336,6 +343,10 @@ def make_backend(runtime: str, precision: str | None,
         raise SystemExit("--unoptimized (L0 generate() decode loop) is "
                          "implemented for pytorch, openvino, llamacpp only, "
                          "not onnx.")
+    if last_pos_logits and runtime != "pytorch":
+        raise SystemExit("--last-pos-logits is pytorch-only: onnx/openvino "
+                         "bake the last-position projection into the export, "
+                         "llama.cpp always projects only the last token.")
     prec = precision or DEFAULT_PRECISION[runtime]
     return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache,
-                              unoptimized)
+                              unoptimized, last_pos_logits)

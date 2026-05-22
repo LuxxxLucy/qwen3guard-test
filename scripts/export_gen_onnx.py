@@ -25,6 +25,104 @@ import argparse
 import sys
 from pathlib import Path
 
+# INT64_MAX — Slice `end` for "to the end of the axis".
+_INT64_MAX = 2**63 - 1
+
+
+def slice_lm_head_last_pos(model_path: Path) -> None:
+    """Restrict the output projection (lm_head) to the last sequence position.
+
+    The lm_head is the ONNX MatMul that produces the graph's `logits` output
+    (directly, or through a Cast). Its non-initializer input is the hidden
+    states `[batch, seq, hidden]`. We splice a `Slice` onto that input keeping
+    only the last position (axis=1, start=-1, end=INT64_MAX, step=1), so the
+    MatMul runs over `[batch, 1, hidden]` and `logits` becomes `[batch, 1, V]`.
+    The L2 path reads only `logits[:, -1]`, so the prompt positions were wasted.
+
+    Edits model.onnx in place. Idempotent: a second call detects the existing
+    Slice and does nothing.
+    """
+    import onnx
+    from onnx import helper, numpy_helper
+    import numpy as np
+
+    model = onnx.load(str(model_path))
+    graph = model.graph
+
+    init_names = {i.name for i in graph.initializer}
+    producer = {o: n for n in graph.node for o in n.output}
+
+    # Locate the lm_head MatMul: walk back from the `logits` output through any
+    # Cast to the MatMul that feeds it.
+    node = producer.get("logits")
+    if node is None:
+        raise RuntimeError("graph has no `logits` output producer")
+    while node.op_type == "Cast":
+        node = producer[node.input[0]]
+    if node.op_type != "MatMul":
+        raise RuntimeError(f"expected lm_head MatMul, found {node.op_type}")
+    matmul = node
+
+    # The hidden-states input is the MatMul input that is not an initializer.
+    hid_inputs = [i for i in matmul.input if i not in init_names]
+    if len(hid_inputs) != 1:
+        raise RuntimeError(
+            f"lm_head MatMul {matmul.name} has {len(hid_inputs)} non-initializer "
+            f"inputs, expected 1")
+    hidden = hid_inputs[0]
+
+    sliced_name = "lm_head_hidden_last"
+    if any(sliced_name in n.output for n in graph.node):
+        print(f"[export-onnx] slice-lm-head: {model_path} already sliced; skipping.")
+        return
+
+    # Slice index constants as initializers.
+    consts = {
+        "lm_head_slice_starts": np.array([-1], dtype=np.int64),
+        "lm_head_slice_ends": np.array([_INT64_MAX], dtype=np.int64),
+        "lm_head_slice_axes": np.array([1], dtype=np.int64),
+        "lm_head_slice_steps": np.array([1], dtype=np.int64),
+    }
+    for cname, arr in consts.items():
+        graph.initializer.append(numpy_helper.from_array(arr, name=cname))
+
+    slice_node = helper.make_node(
+        "Slice",
+        inputs=[hidden, "lm_head_slice_starts", "lm_head_slice_ends",
+                "lm_head_slice_axes", "lm_head_slice_steps"],
+        outputs=[sliced_name],
+        name="lm_head_last_pos_slice",
+    )
+
+    # Rewire the MatMul to consume the sliced hidden states.
+    for k, inp in enumerate(matmul.input):
+        if inp == hidden:
+            matmul.input[k] = sliced_name
+
+    # Insert the Slice in topological order: right after the node producing
+    # `hidden` (or at the front if `hidden` is a graph input).
+    hidden_producer = producer.get(hidden)
+    if hidden_producer is None:
+        graph.node.insert(0, slice_node)
+    else:
+        idx = list(graph.node).index(hidden_producer)
+        graph.node.insert(idx + 1, slice_node)
+
+    # `logits` sequence dim is now 1.
+    for o in graph.output:
+        if o.name == "logits":
+            dims = o.type.tensor_type.shape.dim
+            if len(dims) >= 2:
+                dims[1].Clear()
+                dims[1].dim_value = 1
+
+    use_ext = (model_path.with_suffix(".onnx_data")).exists()
+    onnx.save(model, str(model_path), save_as_external_data=use_ext,
+              all_tensors_to_one_file=True,
+              location=model_path.name + "_data" if use_ext else None)
+    print(f"[export-onnx] slice-lm-head: {model_path} -> lm_head MatMul now "
+          f"projects only the last position (logits seq dim = 1).")
+
 
 def export_fp32(model_id: str, out: Path, opset: int) -> None:
     if (out / "model.onnx").exists():
@@ -43,6 +141,9 @@ def export_fp32(model_id: str, out: Path, opset: int) -> None:
         trust_remote_code=True,
         no_post_process=True,
     )
+    # Restrict lm_head to the last position before int8/int4 quantize this
+    # model, so the quantized exports inherit the slice.
+    slice_lm_head_last_pos(out / "model.onnx")
     print(f"[export-onnx] fp32 done: {out}")
 
 
@@ -99,6 +200,7 @@ def export_withpast(model_id: str, base: Path, opset: int) -> None:
         trust_remote_code=True,
         no_post_process=True,
     )
+    slice_lm_head_last_pos(out / "model.onnx")
     print(f"[export-onnx] with-past done: {out}")
 
 
