@@ -2,12 +2,14 @@
 
 OpenVINO is the strongest CPU runtime on Intel x86 (AVX-512 / VNNI). The export
 uses optimum-intel; int8 / int4 apply NNCF weight compression (weights quantized,
-activations stay fp32 — the W8A16 / W4A16 pattern).
+activations stay fp32 — the W8A16 / W4A16 pattern). The fp16 precision is the
+unquantized export — optimum-intel stores its weights as fp16 (compress_to_fp16,
+the default), so it is labelled fp16, not fp32.
 
 Layout (one IR per precision subdir, which `bench_gen_cpu.py --artifact` points at):
 
   ov_models/Qwen3Guard-Gen-0.6B/
-    fp32/openvino_model.xml   full precision
+    fp16/openvino_model.xml   unquantized export (fp16 weights)
     int8/openvino_model.xml   INT8 weight compression
     int4/openvino_model.xml   INT4 weight compression (group_size 128)
 
@@ -33,7 +35,7 @@ def slice_lm_head_last_position(xml_path: Path) -> None:
     This inserts a Slice on the lm_head MatMul's hidden-state input keeping just
     the last position (axis=1), so the IR emits logits of shape [batch, 1, vocab].
     Generation reads only the last position per step, so this stays correct for
-    the L0 generate() path too. The lm_head MatMul exists in the fp32 / int8 /
+    the L0 generate() path too. The lm_head MatMul exists in the fp16 / int8 /
     int4 IRs regardless of weight quantization, so this applies to all three.
 
     The edited IR is saved to a sibling temp path, then atomically swapped in:
@@ -84,7 +86,7 @@ def export_one(model_id: str, out: Path, precision: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
     from optimum.intel import OVModelForCausalLM, OVWeightQuantizationConfig
 
-    if precision == "fp32":
+    if precision == "fp16":
         qcfg = None
     elif precision == "int8":
         qcfg = OVWeightQuantizationConfig(bits=8)
@@ -107,8 +109,8 @@ def main() -> int:
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B")
     ap.add_argument("--out-dir", default=None,
                     help="Base dir. Default: ov_models/<model_basename>")
-    ap.add_argument("--precisions", nargs="+", default=["fp32"],
-                    choices=["fp32", "int8", "int4"])
+    ap.add_argument("--precisions", nargs="+", default=["fp16"],
+                    choices=["fp16", "int8", "int4"])
     args = ap.parse_args()
 
     base = Path(args.out_dir) if args.out_dir else Path("ov_models") / Path(args.model_id).name

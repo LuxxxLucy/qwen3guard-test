@@ -88,9 +88,9 @@ section "3/8  export ONNX (fp32, int8, with-past)"
 step "export onnx" uv run python scripts/export_gen_onnx.py \
     --model-id "$MODEL_ID" --precisions fp32 int8 --with-past
 
-section "4/8  export OpenVINO (fp32, int8)"
+section "4/8  export OpenVINO (fp16, int8)"
 step "export openvino" uv run python scripts/export_gen_openvino.py \
-    --model-id "$MODEL_ID" --precisions fp32 int8
+    --model-id "$MODEL_ID" --precisions fp16 int8
 
 section "5/8  export GGUF (f16, q8_0)"
 step "export gguf" uv run python scripts/export_gen_gguf.py \
@@ -121,9 +121,9 @@ gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/fp32"
 gen --runtime onnx     --precision int8  --artifact "onnx_models/$BASENAME/int8"
 # ONNX again with the shared system-prompt prefix KV-cached (with-past graph).
 gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withpast" --kv-cache
-gen --runtime openvino --precision fp32  --artifact "ov_models/$BASENAME/fp32"
+gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16"
 gen --runtime openvino --precision int8  --artifact "ov_models/$BASENAME/int8"
-gen --runtime openvino --precision fp32  --artifact "ov_models/$BASENAME/fp32" --unoptimized
+gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16" --unoptimized
 gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"
 # llama.cpp again with the shared system-prompt prefix KV-cached.
 gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --kv-cache

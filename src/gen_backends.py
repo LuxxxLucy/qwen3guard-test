@@ -7,7 +7,7 @@ that executes the forward:
 
   pytorch   — transformers AutoModelForCausalLM, float32 eager
   onnx      — ONNX Runtime, CPUExecutionProvider (fp32 / int8 / int4 weights)
-  openvino  — OpenVINO via optimum-intel (fp32 / int8 / int4 weight compression)
+  openvino  — OpenVINO via optimum-intel (fp16 / int8 / int4 weight compression)
   llamacpp  — llama.cpp via llama-cpp-python (GGUF f16 / q8_0 / q4_k_m)
 
 The exported artifacts are produced by scripts/export_gen_{onnx,openvino,gguf}.py.
@@ -31,7 +31,7 @@ L0_MAX_NEW_TOKENS = 32
 DEFAULT_PRECISION = {
     "pytorch": "fp32",
     "onnx": "fp32",
-    "openvino": "fp32",
+    "openvino": "fp16",
     "llamacpp": "f16",
 }
 
