@@ -11,35 +11,54 @@ import json
 import sys
 from pathlib import Path
 
+from contract import DEFAULT_PRECISION, OPT_LEVELS, RUNTIMES, TEMPLATES, ResultExtra
+
+RT_PYTORCH, RT_ONNX, RT_OPENVINO, RT_LLAMACPP = RUNTIMES
+OPT_LP, OPT_L0, OPT_L1, OPT_L2, OPT_L2_LASTPOS, OPT_L3 = OPT_LEVELS
+
 # (runtime, precision, opt_level, kv_cache) -> row label. Order = table order.
 ROWS: list[tuple[tuple[str, str, str, bool], str]] = [
-    (("pytorch",     "fp32",   "L0", False), "pytorch (L0)"),
-    (("pytorch",     "fp32",   "L2", False), "pytorch (L2)"),
-    (("pytorch",     "fp32",   "L2-lastpos", False), "pytorch (L2 last-pos)"),
-    (("onnx",        "fp32",   "L2", False), "onnx fp32"),
-    (("onnx",        "int8",   "L2", False), "onnx int8"),
-    (("onnx",        "fp32",   "L2", True),  "onnx fp32 +kv"),
-    (("openvino",    "fp16",   "L0", False), "openvino (L0)"),
-    (("openvino",    "fp16",   "L2", False), "openvino fp16"),
-    (("openvino",    "int8",   "L2", False), "openvino int8"),
-    (("llamacpp",    "q8_0",   "L0", False), "llamacpp (L0)"),
-    (("llamacpp",    "q8_0",   "L2", False), "llamacpp q8_0"),
-    (("llamacpp",    "q8_0",   "L2", True),  "llamacpp q8_0 +kv"),
-    (("llamacpp",    "f16",    "L2", False), "llamacpp f16"),
-    (("llamacpp",    "f16",    "L2", True),  "llamacpp f16 +kv"),
-    (("rust-candle", "fp32",   "L0", False), "rust-candle (L0)"),
-    (("rust-candle", "fp32",   "L2", True),  "rust-candle (L2)"),
+    ((RT_PYTORCH,     "fp32",   OPT_L0, False), "pytorch (L0)"),
+    ((RT_PYTORCH,     "fp32",   OPT_L2, False), "pytorch (L2)"),
+    ((RT_PYTORCH,     "fp32",   OPT_L2_LASTPOS, False), "pytorch (L2 last-pos)"),
+    ((RT_ONNX,        "fp32",   OPT_L2, False), "onnx fp32"),
+    ((RT_ONNX,        "int8",   OPT_L2, False), "onnx int8"),
+    ((RT_ONNX,        "fp32",   OPT_L2, True),  "onnx fp32 +kv"),
+    ((RT_OPENVINO,    "fp16",   OPT_L0, False), "openvino (L0)"),
+    ((RT_OPENVINO,    "fp16",   OPT_L2, False), "openvino fp16"),
+    ((RT_OPENVINO,    "int8",   OPT_L2, False), "openvino int8"),
+    ((RT_LLAMACPP,    "q8_0",   OPT_L0, False), "llamacpp (L0)"),
+    ((RT_LLAMACPP,    "q8_0",   OPT_L2, False), "llamacpp q8_0"),
+    ((RT_LLAMACPP,    "q8_0",   OPT_L2, True),  "llamacpp q8_0 +kv"),
+    ((RT_LLAMACPP,    "f16",    OPT_L2, False), "llamacpp f16"),
+    ((RT_LLAMACPP,    "f16",    OPT_L2, True),  "llamacpp f16 +kv"),
+    (("rust-candle", "fp32",   OPT_L0, False), "rust-candle (L0)"),
+    (("rust-candle", "fp32",   OPT_L2, True),  "rust-candle (L2)"),
 ]
-TEMPLATES = ["original", "test-200"]
+
+_EXTRA_FIELDS = set(ResultExtra.__dataclass_fields__)
+assert set(DEFAULT_PRECISION) == set(RUNTIMES)
+assert {"mode", "precision", "opt_level", "kv_cache", "template"} <= _EXTRA_FIELDS
+assert all(r in set(RUNTIMES) | {"rust-candle"} and o in OPT_LEVELS
+           for (r, _p, o, _kv), _label in ROWS)
 
 
 def load_results(results_dir: Path) -> list[dict]:
+    """Read one BenchResult dict per JSON file. Tolerate stale files (list-
+    typed JSONs from deleted bench variants, or anything else dropped here)
+    by skipping with a warning — the table builder only knows the dict shape."""
     out = []
     for p in sorted(results_dir.glob("*.json")):
         try:
-            out.append(json.loads(p.read_text()))
+            obj = json.loads(p.read_text())
         except Exception as e:
             print(f"[warn] could not read {p.name}: {e!r}")
+            continue
+        if not isinstance(obj, dict):
+            print(f"[warn] skipping {p.name}: top-level is {type(obj).__name__}, "
+                  f"not a BenchResult dict")
+            continue
+        out.append(obj)
     return out
 
 

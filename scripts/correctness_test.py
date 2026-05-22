@@ -8,8 +8,8 @@ L0 naive baseline. Reports agreement rate per level.
 Paths tested:
   L0  naive                           (reference)
   L1  +prefix-cache                   (generate with cached head KV)
-  L2  +forced-prefix                  (single forward, argmax last logit)
-  L2' +forced-prefix  (no cache)      (single forward from scratch)
+  L2_cached    +forced-prefix         (single forward, cached head KV)
+  L2_uncached  +forced-prefix         (single forward from scratch)
 
 L3 (compile) is not tested here — torch.compile numerical equivalence
 is a compiler concern; it produces the same logits up to float noise and
@@ -43,7 +43,6 @@ def main() -> int:
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
-    import torch  # noqa: F401  (required by predict_* via bench_gen_pytorch)
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = args.device or pick_device()
@@ -110,7 +109,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [{i}] L2(cached) FAIL: {e!r}")
 
-        # L2' forced-prefix alone (no prefix cache)
+        # L2_uncached forced-prefix alone (no prefix cache)
         try:
             v2u, _ = predict_forced_prefix(
                 model, tok, template_cache, head_ids, user_text, device,

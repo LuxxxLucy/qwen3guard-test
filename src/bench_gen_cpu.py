@@ -22,6 +22,8 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import statistics
 import sys
 from pathlib import Path
@@ -30,16 +32,18 @@ from bench_common import (
     BenchResult, LatencyStats, load_representative_texts, synthesize_prompts,
     warmup_and_measure, write_result,
 )
-from gen_backends import (
-    L0_MAX_NEW_TOKENS, PROVIDER_TAG, PyTorchCPUBackend, make_backend,
+from contract import (
+    L0_MAX_NEW_TOKENS, PROVIDER_TAG, RUNTIMES, TEMPLATES, OptLevel,
+    ResultExtra, Template,
 )
+from gen_backends import PyTorchCPUBackend, make_backend
 from gen_common import (
-    TEMPLATES, VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
+    VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
     discover_verdict_token_ids,
 )
 
 
-def opt_level_of(args) -> str:
+def opt_level_of(args) -> OptLevel:
     """Result-JSON opt_level tag for this run's mode: L0 (generate decode
     loop), L2 (forced-prefix forward), or L2-lastpos (forced-prefix forward
     with the output projection restricted to the last position)."""
@@ -49,7 +53,7 @@ def opt_level_of(args) -> str:
 
 
 def build_samples(tok, n_samples: int, length: int | None,
-                  template: str, unoptimized: bool) -> list[list[int]]:
+                  template: Template, unoptimized: bool) -> list[list[int]]:
     """Return n input token sequences for one (length, template) cell.
     `length` None = representative dataset samples; otherwise synthetic prompts
     of that user-token length. `template` selects the system-prompt block.
@@ -64,20 +68,31 @@ def build_samples(tok, n_samples: int, length: int | None,
     return [build_forced_ids(tok, t, template) for t in texts]
 
 
-def verify_against_pytorch(ref, backend, samples: list[list[int]]) -> None:
+def build_samples_for_mode(tok, n_samples: int, length: int | None,
+                           template: Template, unoptimized: bool,
+                           verbose: bool) -> list[list[int]]:
+    if verbose:
+        return build_samples(tok, n_samples, length, template, unoptimized)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return build_samples(tok, n_samples, length, template, unoptimized)
+
+
+def verify_against_pytorch(ref, backend, samples: list[list[int]],
+                           verbose: bool) -> None:
     """Cross-check: the runtime under test should produce the same verdict
     argmax as the PyTorch-CPU fp32 reference. Quantization may flip a borderline
     sample, so this reports agreement rather than asserting — a low count is a
     warning, not a crash."""
     probe = samples[:10]
     agree = sum(ref.predict(s) == backend.predict(s) for s in probe)
-    tag = "OK" if agree == len(probe) else "DRIFT"
-    print(f"[verify] verdict-argmax agreement vs pytorch-cpu fp32: "
-          f"{agree}/{len(probe)}  {tag}")
+    if verbose:
+        tag = "OK" if agree == len(probe) else "DRIFT"
+        print(f"[verify] verdict-argmax agreement vs pytorch-cpu fp32: "
+              f"{agree}/{len(probe)}  {tag}")
 
 
 def run_cell(backend, samples: list[list[int]], args, length: int | None,
-             template: str) -> None:
+             template: Template) -> None:
     median_tokens = int(statistics.median(len(s) for s in samples))
     lat = warmup_and_measure(backend.predict, samples, args.n_warmup, device="cpu")
     mode = "representative" if length is None else f"sweep-len{length}"
@@ -95,37 +110,43 @@ def run_cell(backend, samples: list[list[int]], args, length: int | None,
         input_token_count_median=median_tokens,
         output_token_count=output_token_count,
         latency=LatencyStats.from_samples(lat),
-        extra={
-            "mode": mode,
-            "opt_level": opt_level,
-            "runtime": backend.runtime,
-            "precision": backend.precision,
-            "threads": args.threads,
-            "runtime_detail": backend.detail,
-            "target_user_tokens": length,
-            "template": template,
-            "kv_cache": args.kv_cache,
-        },
+        extra=ResultExtra(
+            mode=mode,
+            opt_level=opt_level,
+            runtime=backend.runtime,
+            precision=backend.precision,
+            threads=args.threads,
+            runtime_detail=backend.detail,
+            target_user_tokens=length,
+            template=template,
+            kv_cache=args.kv_cache,
+        ).to_dict(),
     )
     tag = f"_{backend.precision}_{template}_{opt_level}"
     if args.kv_cache:
         tag += "_kvcache"
     path = write_result(res, Path(args.out_dir), tag=tag)
     lt = res.latency
-    print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {opt_level} "
-          f"{template} {mode} len={median_tokens}  p50={lt.p50_ms:.1f}ms "
-          f"p95={lt.p95_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
-          f"thr={lt.throughput_rps:.2f} rps")
-    print(f"[bench-gen-cpu] wrote {path}")
+    if args.verbose:
+        print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {opt_level} "
+              f"{template} {mode} len={median_tokens}  p50={lt.p50_ms:.1f}ms "
+              f"p95={lt.p95_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
+              f"thr={lt.throughput_rps:.2f} rps")
+        print(f"[bench-gen-cpu] wrote {path}")
+    else:
+        mode_part = "" if length is None else f" {mode}"
+        print(f"[gen] {backend.runtime}/{backend.precision} {opt_level} "
+              f"{template}{mode_part} len={median_tokens}  "
+              f"p50={lt.p50_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
+              f"thr={lt.throughput_rps:.2f} rps")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runtime", required=True,
-                    choices=["pytorch", "onnx", "openvino", "llamacpp"])
+    ap.add_argument("--runtime", required=True, choices=list(RUNTIMES))
     ap.add_argument("--precision", default=None,
-                    help="fp32|int8 (onnx/openvino); f16|q8_0 (llamacpp). "
-                         "Default: the runtime's full precision.")
+                    help="fp32|int8 (onnx); fp16|int8|int4 (openvino); "
+                         "f16|q8_0 (llamacpp). Default: the runtime's full precision.")
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B",
                     help="Source HF id — tokenizer + pytorch weights + tagging.")
     ap.add_argument("--template", nargs="+", default=list(TEMPLATES),
@@ -175,6 +196,8 @@ def main() -> int:
                          "length, no cross-runtime verify. Confirms the runtime "
                          "executes end to end — the latency numbers are not "
                          "meaningful.")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Print startup diagnostics and per-cell result paths.")
     args = ap.parse_args()
 
     if args.dry_run:
@@ -190,14 +213,17 @@ def main() -> int:
     # fixed text), so one probe serves every template; the first suffices.
     verdict_ids = discover_verdict_token_ids(tok, args.template[0])
     verdict_token_ids = [verdict_ids[v] for v in VERDICT_LABELS]
-    print(f"[bench-gen-cpu] model={args.model_id} runtime={args.runtime} "
-          f"templates={args.template} opt_level={opt_level_of(args)} "
-          f"verdict_token_ids={dict(verdict_ids)}")
+    if args.verbose:
+        print(f"[bench-gen-cpu] model={args.model_id} runtime={args.runtime} "
+              f"templates={args.template} opt_level={opt_level_of(args)} "
+              f"verdict_token_ids={dict(verdict_ids)}")
 
     cells: list[int | None] = list(args.lengths) if args.lengths else [None]
     # sample pools indexed by (template, length); built once, reused per cell.
     sample_pools = {
-        (tmpl, L): build_samples(tok, args.n_samples, L, tmpl, args.unoptimized)
+        (tmpl, L): build_samples_for_mode(
+            tok, args.n_samples, L, tmpl, args.unoptimized, args.verbose,
+        )
         for tmpl in args.template for L in cells
     }
     max_seq_len = max(len(s) for pool in sample_pools.values() for s in pool)
@@ -206,7 +232,8 @@ def main() -> int:
                            args.threads, args.kv_cache, args.unoptimized,
                            args.last_pos_logits)
     backend.load(args.model_id, args.artifact, max_seq_len)
-    print(f"[bench-gen-cpu] backend loaded: {backend.detail}")
+    if args.verbose:
+        print(f"[bench-gen-cpu] backend loaded: {backend.detail}")
 
     # PyTorch-CPU fp32 reference for the cross-runtime verdict check — loaded
     # once and reused across templates (the model is template-independent).
@@ -220,10 +247,11 @@ def main() -> int:
         if args.kv_cache:
             prefix = common_prefix([s for pool in tmpl_pools.values() for s in pool])
             backend.prime_prefix(prefix)
-            print(f"[bench-gen-cpu] kv-cache primed [{tmpl}]: shared prefix = "
-                  f"{len(prefix)} tokens (suffix-only forward per request)")
+            if args.verbose:
+                print(f"[bench-gen-cpu] kv-cache primed [{tmpl}]: shared prefix = "
+                      f"{len(prefix)} tokens (suffix-only forward per request)")
         if ref is not None:
-            verify_against_pytorch(ref, backend, tmpl_pools[cells[0]])
+            verify_against_pytorch(ref, backend, tmpl_pools[cells[0]], args.verbose)
         for L in cells:
             run_cell(backend, tmpl_pools[L], args, L, tmpl)
     return 0

@@ -52,15 +52,23 @@ benchmark only benefits from caching that the code EXPLICITLY installed
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import io
 import statistics
 import sys
 from pathlib import Path
+from typing import cast
 
 from bench_common import (
     BenchResult, LatencyStats, load_representative_texts,
     synthesize_input_ids, synthesize_prompts,
     pick_device, pick_dtype, warmup_and_measure, write_result,
+)
+from contract import OptLevel, ResultExtra
+from gen_common import (
+    VERDICT_LABELS, discover_forced_prefix, discover_verdict_token_ids,
+    render_prompt,
 )
 
 
@@ -127,73 +135,7 @@ def precompute_template_cache(model, head_ids: list[int], device: str):
     return out.past_key_values
 
 
-# --- Forced-prefix probing -------------------------------------------------
-
-# Qwen3Guard-Gen is a 3-way classifier: Safe / Unsafe / Controversial. The
-# verdict is the first information-bearing token after "Safety: ".
-VERDICT_LABELS: tuple[str, ...] = ("Safe", "Unsafe", "Controversial")
-
-
-def discover_forced_prefix(
-    tokenizer, rendered_prompt: str,
-) -> tuple[list[int], int, dict[str, int]]:
-    """Given a rendered chat prompt, return:
-       (full_ids_stop_before_verdict, diff_pos, verdict_token_ids)
-
-    `full_ids_stop_before_verdict` is the tokenization of
-    `rendered_prompt + "Safety: "` — the model, forwarded over these tokens,
-    predicts the first verdict subtoken at the last position. `diff_pos` is
-    its length. `verdict_token_ids` maps each verdict label
-    ("Safe"/"Unsafe"/"Controversial") to the token id at `diff_pos`
-    (the first subtoken of that verdict word — may be a full-word token for
-    "Safe" or a multi-subtoken start like "Un"/"Cont" for the others).
-
-    We probe per-prompt because BPE can merge `Safety: ` with the preceding
-    `<|im_start|>assistant\\n` differently depending on what came before.
-    The probe itself is a few tokenize() calls — microseconds.
-    """
-    tokenized = {
-        v: tokenizer.encode(rendered_prompt + f"Safety: {v}", add_special_tokens=False)
-        for v in VERDICT_LABELS
-    }
-    # All three strings share a common prefix up to the verdict word; the
-    # first position where any two tokenizations diverge is `diff_pos`.
-    min_len = min(len(t) for t in tokenized.values())
-    diff_pos: int | None = None
-    for i in range(min_len):
-        tids = {t[i] for t in tokenized.values()}
-        if len(tids) > 1:
-            diff_pos = i
-            break
-    if diff_pos is None:
-        raise RuntimeError(
-            "forced-prefix probe failed: Safe/Unsafe/Controversial tokenized "
-            "to the same prefix up to min_len — no divergence point."
-        )
-    verdict_ids = {v: tokenized[v][diff_pos] for v in VERDICT_LABELS}
-    # The three first-subtokens must be distinct, otherwise we cannot
-    # distinguish the verdicts by reading a single logit position.
-    if len(set(verdict_ids.values())) != 3:
-        raise RuntimeError(
-            f"forced-prefix probe failed: verdict first-subtokens collide: "
-            f"{verdict_ids}"
-        )
-    ref = tokenized["Safe"]
-    return ref[:diff_pos], diff_pos, verdict_ids
-
-
 # --- Prediction paths (used by bench + correctness test) ------------------
-
-def render_prompt(tokenizer, user_text: str) -> str:
-    """Apply chat template with add_generation_prompt=True so the rendered
-    prompt ends at `<|im_start|>assistant\\n`. Appending "Safety: " lands
-    cleanly at the start of the assistant response."""
-    return tokenizer.apply_chat_template(
-        [{"role": "user", "content": user_text}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
 
 def predict_naive(model, tok, user_text: str, device: str,
                   max_new_tokens: int) -> tuple[str, list[int]]:
@@ -326,9 +268,27 @@ def extract_verdict(generated_text: str) -> str:
 
 # --- Startup correctness check --------------------------------------------
 
+def display_dtype(dtype) -> str:
+    name = str(dtype).replace("torch.", "")
+    return {
+        "float32": "fp32",
+        "float16": "fp16",
+        "bfloat16": "bf16",
+    }.get(name, name)
+
+
+def load_representative_texts_for_mode(max_samples: int, tokenizer,
+                                       verbose: bool) -> list[str]:
+    if verbose:
+        return load_representative_texts(max_samples=max_samples, tokenizer=tokenizer)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return load_representative_texts(max_samples=max_samples, tokenizer=tokenizer)
+
+
 def startup_correctness_check(tok, model, head_ids, template_cache, device,
                               max_new_tokens, use_prefix_cache, use_forced_prefix,
-                              compile_enabled: bool = False):
+                              compile_enabled: bool = False,
+                              verbose: bool = False) -> bool:
     """Sanity check on one 64-token synthetic sample: verify every enabled
     optimization agrees with the L0 verdict. Not a replacement for the
     dataset correctness test; fails loudly if an optimization is wrong.
@@ -347,22 +307,34 @@ def startup_correctness_check(tok, model, head_ids, template_cache, device,
 
     if compile_enabled:
         if not use_forced_prefix:
-            print("[correctness] L3 without --forced-prefix: skipping decode-loop "
-                  "correctness check (incompatible with reduce-overhead CUDA graphs).")
-            return
+            line = ("[correctness] L3 without --forced-prefix: skipping decode-loop "
+                    "correctness check (incompatible with reduce-overhead CUDA graphs).")
+            if verbose:
+                print(line)
+            else:
+                print("[correctness] startup check OK (L3 decode-loop check skipped; "
+                      "no forced-prefix under torch.compile)")
+            return True
         v, pred_id = predict_forced_prefix(
             model, tok, template_cache, head_ids, user_text, device,
             use_prefix_cache, compile_enabled=True,
         )
-        print(f"[correctness] L3 forced:    verdict={v!r} token={pred_id}  "
-              f"(baseline skipped under torch.compile; see scripts/correctness_test.py)")
-        return
+        if verbose:
+            print(f"[correctness] L3 forced:    verdict={v!r} token={pred_id}  "
+                  f"(baseline skipped under torch.compile; see scripts/correctness_test.py)")
+        else:
+            print("[correctness] startup check OK (L3 forced verdict computed; "
+                  "L0/L1 skipped under torch.compile)")
+        return True
 
     baseline_verdict, baseline_gen = predict_naive(
         model, tok, user_text, device, max_new_tokens,
     )
-    print(f"[correctness] L0 baseline: verdict={baseline_verdict!r} "
-          f"gen={tok.decode(baseline_gen, skip_special_tokens=True)[:80]!r}")
+    lines = [
+        f"[correctness] L0 baseline: verdict={baseline_verdict!r} "
+        f"gen={tok.decode(baseline_gen, skip_special_tokens=True)[:80]!r}"
+    ]
+    mismatch = False
 
     if use_prefix_cache:
         v, gen_c = predict_cached(
@@ -370,8 +342,9 @@ def startup_correctness_check(tok, model, head_ids, template_cache, device,
         )
         ok = gen_c == baseline_gen
         tag = "OK" if ok else "MISMATCH"
-        print(f"[correctness] L1 cached:    verdict={v!r}  {tag} "
-              f"(token-exact vs baseline: {ok})")
+        lines.append(f"[correctness] L1 cached:    verdict={v!r}  {tag} "
+                     f"(token-exact vs baseline: {ok})")
+        mismatch = mismatch or not ok
 
     if use_forced_prefix:
         v, pred_id = predict_forced_prefix(
@@ -380,7 +353,25 @@ def startup_correctness_check(tok, model, head_ids, template_cache, device,
         )
         ok = v == baseline_verdict
         tag = "OK" if ok else f"MISMATCH (baseline={baseline_verdict!r})"
-        print(f"[correctness] L2 forced:    verdict={v!r} token={pred_id}  {tag}")
+        lines.append(f"[correctness] L2 forced:    verdict={v!r} token={pred_id}  {tag}")
+        mismatch = mismatch or not ok
+
+    if verbose or mismatch:
+        for line in lines:
+            print(line)
+    else:
+        if use_prefix_cache and use_forced_prefix:
+            print("[correctness] startup check OK (L0 baseline + L1 cached token-exact "
+                  "+ L2 forced verdict matches; skipped levels not checked)")
+        else:
+            checked = ["L0 baseline"]
+            if use_prefix_cache:
+                checked.append("L1 cached token-exact")
+            if use_forced_prefix:
+                checked.append("L2 forced verdict matches")
+            print(f"[correctness] startup check OK ({' + '.join(checked)}; "
+                  "skipped levels not checked)")
+    return not mismatch
 
 
 # --- Step functions for the benchmark loop --------------------------------
@@ -542,6 +533,8 @@ def main() -> int:
     ap.add_argument("--opt-level", default=None,
                     help="Optional tag (e.g. 'L0'/'L1'/'L2'/'L3'/'LP') written "
                          "into the result JSON for easier grouping.")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Print startup diagnostics and per-cell result paths.")
     args = ap.parse_args()
 
     # --prefill-only supersedes other optimizations: the whole point is to
@@ -565,8 +558,9 @@ def main() -> int:
                    f"last_pos_logits={args.last_pos_logits} "
                    f"compile={args.compile} "
                    f"prefill_only={args.prefill_only}")
-    print(f"[bench-gen-pt] model={args.model_id} device={device} dtype={dtype} "
-          f"opt_level={args.opt_level} {opt_summary}")
+    if args.verbose:
+        print(f"[bench-gen-pt] model={args.model_id} device={device} dtype={dtype} "
+              f"opt_level={args.opt_level} {opt_summary}")
     tok = AutoTokenizer.from_pretrained(args.model_id)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id, dtype=dtype,
@@ -578,28 +572,16 @@ def main() -> int:
         add_generation_prompt=True,
     )
     nominal_template_overhead = len(tok.encode(empty_rendered, add_special_tokens=False))
-    print(f"[bench-gen-pt] cacheable_head={len(head_ids)} "
-          f"nominal_template_overhead={nominal_template_overhead}")
+    if args.verbose:
+        print(f"[bench-gen-pt] cacheable_head={len(head_ids)} "
+              f"nominal_template_overhead={nominal_template_overhead}")
 
-    # Discover the 3 verdict token ids (Safe/Unsafe/Controversial) using a
-    # representative rendered prompt. These ids are tokenizer-dependent but
-    # prompt-independent in practice (the "Safety: " boundary is fixed
-    # text); we assert consistency on a second probe as a guard.
-    _probe_rendered = render_prompt(tok, "Representative probe content for verdict id discovery.")
-    _, _, _probe_verdict_ids = discover_forced_prefix(tok, _probe_rendered)
-    _probe_rendered_2 = render_prompt(tok, "Another arbitrary probe 12345 !@# so BPE can differ.")
-    _, _, _probe_verdict_ids_2 = discover_forced_prefix(tok, _probe_rendered_2)
-    if _probe_verdict_ids != _probe_verdict_ids_2:
-        raise RuntimeError(
-            "verdict token ids vary across prompts; cannot precompute "
-            f"a shared readout tensor. probe1={_probe_verdict_ids} "
-            f"probe2={_probe_verdict_ids_2}"
-        )
-    verdict_ids = _probe_verdict_ids
+    verdict_ids = discover_verdict_token_ids(tok)
     verdict_token_ids_tensor = torch.tensor(
         [verdict_ids[v] for v in VERDICT_LABELS], dtype=torch.long, device=device,
     )
-    print(f"[bench-gen-pt] verdict_token_ids={dict(verdict_ids)}")
+    if args.verbose:
+        print(f"[bench-gen-pt] verdict_token_ids={dict(verdict_ids)}")
 
     # Precompute the template cache BEFORE applying torch.compile. Under
     # reduce-overhead mode the compiled forward returns cudagraph-captured
@@ -616,7 +598,8 @@ def main() -> int:
         # forcing a recompile per shape; reduce-overhead enables CUDA graphs
         # when possible. Fall back to eager if the inductor backend can't
         # compile for this setup (rare, but better than crashing the run).
-        print(f"[bench-gen-pt] torch.compile enabled (mode=reduce-overhead, dynamic=True)")
+        if args.verbose:
+            print(f"[bench-gen-pt] torch.compile enabled (mode=reduce-overhead, dynamic=True)")
         try:
             model.forward = torch.compile(
                 model.forward, mode="reduce-overhead", dynamic=True,
@@ -626,11 +609,13 @@ def main() -> int:
 
     # Startup correctness sanity — verifies each enabled optimization gives
     # the same verdict as L0 on one synthetic sample. Fast.
-    startup_correctness_check(
+    if not startup_correctness_check(
         tok, model, head_ids, template_cache, device, args.max_new_tokens,
         args.prefix_cache, args.forced_prefix,
         compile_enabled=args.compile,
-    )
+        verbose=args.verbose,
+    ):
+        return 1
 
     T_head = len(head_ids) if template_cache is not None else 0
     step = make_step(
@@ -646,7 +631,7 @@ def main() -> int:
         last_pos_logits=args.last_pos_logits,
     )
 
-    opt_tag = args.opt_level or (
+    opt_tag: OptLevel = cast(OptLevel, args.opt_level) if args.opt_level else (
         "LP" if args.prefill_only else
         "L3" if args.compile else
         "L2-lastpos" if (args.forced_prefix and args.last_pos_logits) else
@@ -711,31 +696,39 @@ def main() -> int:
                     else args.max_new_tokens
                 ),
                 latency=LatencyStats.from_samples(lat),
-                extra={"mode": f"sweep-len{L}",
-                       "opt_level": opt_tag,
-                       "target_user_tokens": L,
-                       "user_tokens_median": user_tokens_median,
-                       "n_distinct_samples": len(full_ids_list),
-                       "nominal_template_overhead_tokens": nominal_template_overhead,
-                       "cacheable_head_tokens": len(head_ids),
-                       "total_input_tokens_median": total_tokens_median,
-                       "chat_template_applied": True,
-                       "prefix_cache": args.prefix_cache,
-                       "forced_prefix": args.forced_prefix,
-                       "last_pos_logits": args.last_pos_logits,
-                       "compile": args.compile,
-                       "prefill_only": args.prefill_only},
+                extra=ResultExtra(
+                    mode=f"sweep-len{L}",
+                    opt_level=opt_tag,
+                    target_user_tokens=L,
+                    user_tokens_median=user_tokens_median,
+                    n_distinct_samples=len(full_ids_list),
+                    nominal_template_overhead_tokens=nominal_template_overhead,
+                    cacheable_head_tokens=len(head_ids),
+                    total_input_tokens_median=total_tokens_median,
+                    chat_template_applied=True,
+                    prefix_cache=args.prefix_cache,
+                    forced_prefix=args.forced_prefix,
+                    last_pos_logits=args.last_pos_logits,
+                    compile=args.compile,
+                    prefill_only=args.prefill_only,
+                ).to_dict(),
             )
             path = write_result(res, Path(args.out_dir))
-            print(f"[bench-gen-pt] ({opt_tag} sweep-len{L}  "
-                  f"user~={user_tokens_median}  template={nominal_template_overhead}  "
-                  f"total~={total_tokens_median}  n_distinct={len(full_ids_list)}) "
-                  f"wrote {path}")
-            print(f"[bench-gen-pt] p50={res.latency.p50_ms:.1f}ms "
-                  f"p95={res.latency.p95_ms:.1f}ms p99={res.latency.p99_ms:.1f}ms "
-                  f"thr={res.latency.throughput_rps:.2f} rps")
+            if args.verbose:
+                print(f"[bench-gen-pt] ({opt_tag} sweep-len{L}  "
+                      f"user~={user_tokens_median}  template={nominal_template_overhead}  "
+                      f"total~={total_tokens_median}  n_distinct={len(full_ids_list)}) "
+                      f"wrote {path}")
+                print(f"[bench-gen-pt] p50={res.latency.p50_ms:.1f}ms "
+                      f"p95={res.latency.p95_ms:.1f}ms p99={res.latency.p99_ms:.1f}ms "
+                      f"thr={res.latency.throughput_rps:.2f} rps")
+            else:
+                print(f"[gen] pytorch/{display_dtype(dtype)} {opt_tag} sweep-len{L} "
+                      f"len={total_tokens_median}  p50={res.latency.p50_ms:.1f}ms "
+                      f"p99={res.latency.p99_ms:.1f}ms "
+                      f"thr={res.latency.throughput_rps:.2f} rps")
     else:
-        samples = load_representative_texts(max_samples=args.n_samples, tokenizer=tok)
+        samples = load_representative_texts_for_mode(args.n_samples, tok, args.verbose)
         if not samples:
             print("[err] no samples available.", file=sys.stderr)
             return 1
@@ -766,24 +759,32 @@ def main() -> int:
                 else args.max_new_tokens
             ),
             latency=LatencyStats.from_samples(lat),
-            extra={"mode": "representative",
-                   "opt_level": opt_tag,
-                   "target_user_tokens": None,
-                   "nominal_template_overhead_tokens": nominal_template_overhead,
-                   "cacheable_head_tokens": len(head_ids),
-                   "chat_template_applied": True,
-                   "prefix_cache": args.prefix_cache,
-                   "forced_prefix": args.forced_prefix,
-                   "last_pos_logits": args.last_pos_logits,
-                   "compile": args.compile,
-                   "prefill_only": args.prefill_only},
+            extra=ResultExtra(
+                mode="representative",
+                opt_level=opt_tag,
+                target_user_tokens=None,
+                nominal_template_overhead_tokens=nominal_template_overhead,
+                cacheable_head_tokens=len(head_ids),
+                chat_template_applied=True,
+                prefix_cache=args.prefix_cache,
+                forced_prefix=args.forced_prefix,
+                last_pos_logits=args.last_pos_logits,
+                compile=args.compile,
+                prefill_only=args.prefill_only,
+            ).to_dict(),
         )
         path = write_result(res, Path(args.out_dir))
-        print(f"[bench-gen-pt] ({opt_tag} representative len={median_tokens}) "
-              f"wrote {path}")
-        print(f"[bench-gen-pt] p50={res.latency.p50_ms:.1f}ms "
-              f"p95={res.latency.p95_ms:.1f}ms p99={res.latency.p99_ms:.1f}ms "
-              f"thr={res.latency.throughput_rps:.2f} rps")
+        if args.verbose:
+            print(f"[bench-gen-pt] ({opt_tag} representative len={median_tokens}) "
+                  f"wrote {path}")
+            print(f"[bench-gen-pt] p50={res.latency.p50_ms:.1f}ms "
+                  f"p95={res.latency.p95_ms:.1f}ms p99={res.latency.p99_ms:.1f}ms "
+                  f"thr={res.latency.throughput_rps:.2f} rps")
+        else:
+            print(f"[gen] pytorch/{display_dtype(dtype)} {opt_tag} representative "
+                  f"len={median_tokens}  p50={res.latency.p50_ms:.1f}ms "
+                  f"p99={res.latency.p99_ms:.1f}ms "
+                  f"thr={res.latency.throughput_rps:.2f} rps")
     return 0
 
 

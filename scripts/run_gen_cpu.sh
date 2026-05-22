@@ -19,9 +19,8 @@
 # No `set -u`: expanding an empty array under nounset errors on the bash 3.2
 # that ships with macOS.
 set -o pipefail
-cd "$(dirname "$0")/.."
-export PYTHONUNBUFFERED=1
-export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
+source "$(dirname "$0")/lib.sh"
+qg_setup_env
 
 MODEL_ID="Qwen/Qwen3Guard-Gen-0.6B"
 N_SAMPLES=100
@@ -37,33 +36,15 @@ for arg in "$@"; do
     esac
 done
 
-detect_threads() {  # physical cores — CPU detection, not a user knob
-    if [[ "$(uname)" == "Darwin" ]]; then
-        sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || sysctl -n hw.physicalcpu
-    else
-        local n
-        n=$(lscpu 2>/dev/null | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2);c=$2}
-                                          /^Socket\(s\)/{gsub(/ /,"",$2);s=$2}
-                                          END{if(c&&s)print c*s}')
-        [[ -n "$n" ]] && echo "$n" || nproc
-    fi
-}
-THREADS="$(detect_threads)"
-
-section() { echo; echo "######## $* ########"; echo; }
-
-# Per-step pass/fail ledger, printed before the summary so a failed runtime is
-# named explicitly rather than inferred from a missing row in the table.
-LEDGER=()
-step() {  # step "label" cmd args...
-    local label="$1"; shift
-    if "$@"; then LEDGER+=("PASS  $label"); else LEDGER+=("FAIL  $label"); fi
-}
+# Cap at 16: this batch=1 prefill-bound workload tops out around there;
+# pinning to a higher physical-core count just adds scheduling noise.
+THREADS="$(qg_detect_threads)"
+[[ "$THREADS" -gt 16 ]] && THREADS=16
 
 echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  model=$MODEL_ID"
 [[ -n "$DRY_RUN" ]] && echo "[run_gen_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
 
-section "1/8  uv sync (llama-cpp-python built from source)"
+qg_section "1/8  uv sync (llama-cpp-python built from source)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
 # pyproject makes the build native. uv keys its build cache by source-dist
@@ -79,33 +60,32 @@ fi
 uv cache clean llama-cpp-python
 uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
-LEDGER+=("PASS  uv sync")
+qg_step "uv sync" true
 
-section "2/8  download weights + Qwen3GuardTest dataset"
-step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
+qg_section "2/8  download weights + Qwen3GuardTest dataset"
+qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
 
-section "3/8  export ONNX (fp32, int8, with-past)"
-step "export onnx" uv run python scripts/export_gen_onnx.py \
+qg_section "3/8  export ONNX (fp32, int8, with-past)"
+qg_step "export onnx" uv run python scripts/export_gen_onnx.py \
     --model-id "$MODEL_ID" --precisions fp32 int8 --with-past
 
-section "4/8  export OpenVINO (fp16, int8)"
-step "export openvino" uv run python scripts/export_gen_openvino.py \
+qg_section "4/8  export OpenVINO (fp16, int8)"
+qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp16 int8
 
-section "5/8  export GGUF (f16, q8_0)"
-step "export gguf" uv run python scripts/export_gen_gguf.py \
+qg_section "5/8  export GGUF (f16, q8_0)"
+qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
     --model-id "$MODEL_ID" --quants f16 q8_0
 
-section "6/8  build Rust candle backend"
-step "cargo build" bash -c "cd rust && cargo build --release"
+qg_section "6/8  build Rust candle backend"
+qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
-section "7/8  dump Rust benchmark inputs"
-step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
+qg_section "7/8  dump Rust benchmark inputs"
+qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
 
-section "8/8  benchmarks"
+qg_section "8/8  benchmarks"
 gen() {
-    echo "--- Gen: $* ---"
-    step "gen $*" uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+    qg_step "gen $*" uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
         --n-samples "$N_SAMPLES" --threads "$THREADS" --verify \
         "${DRY_GEN[@]}" "$@"
     echo
@@ -133,13 +113,13 @@ gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.
 gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"    --kv-cache
 
 echo "--- Gen: rust-candle ---"
-step "gen rust-candle" rust/target/release/qwen3guard-bench \
+qg_step "gen rust-candle" rust/target/release/qwen3guard-bench \
     --input rust/bench_inputs.json --out-dir results "${DRY_RUST[@]}"
 echo
 
-section "step ledger"
-for line in "${LEDGER[@]}"; do echo "  $line"; done
+qg_section "step ledger"
+qg_ledger_print
 
-section "summary"
+qg_section "summary"
 uv run python scripts/summarize_cpu.py
 echo "[run_gen_cpu] done. Raw JSON under results/."

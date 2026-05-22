@@ -17,9 +17,10 @@ import sys
 from pathlib import Path
 
 from bench_common import load_representative_texts
+from contract import TEMPLATES
 from gen_backends import PyTorchCPUBackend
 from gen_common import (
-    TEMPLATES, VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
+    VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
     discover_verdict_token_ids,
 )
 

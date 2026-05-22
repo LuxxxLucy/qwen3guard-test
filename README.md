@@ -20,11 +20,12 @@ The **CPU** path benchmarks Gen across four runtimes — PyTorch, ONNX Runtime, 
 |----------|----------------------|-----------------------|---------------------------------|
 | Gen      | PyTorch              | fp32                  | L2 forced-prefix (one forward)  |
 | Gen      | ONNX Runtime         | fp32, int8, int4      | L2 forced-prefix (one forward)  |
-| Gen      | OpenVINO             | fp32, int8, int4      | L2 forced-prefix (one forward)  |
+| Gen      | OpenVINO             | fp16, int8, int4      | L2 forced-prefix (one forward)  |
 | Gen      | llama.cpp (GGUF)     | f16, q8_0, q4_k_m     | L2 forced-prefix (one forward)  |
 | Stream   | PyTorch              | fp32                  | shipped API + direct path       |
 
 The CPU Gen benchmark runs the **L2 forced-prefix** path only: one forward pass over `prompt + "Safety: "`, read the three verdict logits.
+The ladder also includes **L2-lastpos**: the same forced-prefix input with projection restricted to the last logit row.
 This is the optimized path from the Gen report — no decode loop, no KV cache — so it exports cleanly to every runtime.
 Stream CPU stays on PyTorch: its stateful `trust_remote_code` API with four classification heads does not export cleanly to the other runtimes.
 
@@ -59,7 +60,7 @@ Edit `scripts/run_all.sh`: uncomment the block under "Length-sweep mode". Defaul
 One script does everything — sync, download, export to each runtime, benchmark, print a comparison table:
 
 ```bash
-bash scripts/run_cpu.sh
+bash scripts/run_gen_cpu.sh
 ```
 
 It runs unattended and writes all output to stdout. Knobs (environment variables):
@@ -72,7 +73,7 @@ It runs unattended and writes all output to stdout. Knobs (environment variables
 | `LENGTHS`  | unset            | if set (e.g. `"32 128 512 2048"`), also run a Gen length sweep |
 | `VERIFY`   | `--verify`       | set to `--no-verify` to skip the cross-runtime verdict check   |
 
-Validate the whole pipeline first with `DRY_RUN=1 bash scripts/run_cpu.sh`, then run it for real.
+Validate the whole pipeline first with `DRY_RUN=1 bash scripts/run_gen_cpu.sh`, then run it for real.
 
 Each runtime/precision step is independent: a failure (missing export, runtime not installed) is reported and skipped, the rest of the run continues.
 
@@ -97,16 +98,15 @@ qwen3guard-test/
 │   └── REPORT_STREAM.md     # Stream-variant findings
 ├── scripts/
 │   ├── run_all.sh           # GPU runner — one line per combo
-│   ├── run_cpu.sh           # CPU runner — sync, export, benchmark, summarize
+│   ├── run_gen_cpu.sh       # CPU runner — sync, export, benchmark, summarize
 │   ├── run_optim_ladder_gen.sh
 │   ├── run_optim_ladder_stream.sh
 │   ├── download.py          # pre-fetch weights + dataset
-│   ├── correctness_test.py  # L0 vs L2 verdict equivalence
+│   ├── correctness_test.py  # L0/L1/L2 cached+uncached verdict equivalence
 │   ├── accuracy_check.py    # labeled-data accuracy probe
 │   ├── export_gen_onnx.py     # Gen → ONNX (fp32 / int8 / int4)
-│   ├── export_gen_openvino.py # Gen → OpenVINO IR (fp32 / int8 / int4)
+│   ├── export_gen_openvino.py # Gen → OpenVINO IR (fp16 / int8 / int4)
 │   ├── export_gen_gguf.py     # Gen → GGUF for llama.cpp
-│   ├── export_stream_onnx.py  # stub; see comment
 │   ├── summarize_cpu.py     # CPU result JSON → comparison table
 │   └── make_fig{1,2}{,_stream}.py  # figure generators
 ├── src/
@@ -115,13 +115,7 @@ qwen3guard-test/
 │   ├── gen_backends.py      # CPU runtimes: pytorch / onnx / openvino / llamacpp
 │   ├── bench_gen_cpu.py     # multi-runtime CPU Gen benchmark
 │   ├── bench_gen_pytorch.py
-│   ├── bench_gen_onnx.py
-│   ├── bench_stream_pytorch.py          # shipped-API path
-│   ├── bench_stream_chunked.py          # chunked ingest
-│   ├── bench_stream_direct.py           # bypass shipped API
-│   ├── bench_stream_direct_heads.py     # causality proof
-│   ├── bench_stream_direct_length_sweep.py
-│   └── profile_stream.py
+│   └── bench_stream_pytorch.py          # shipped-API path
 ├── figures/                 # PNGs embedded by reports
 └── results/                 # JSON output (gitignored)
 ```
@@ -149,7 +143,6 @@ Stream results additionally include `extra.per_token` with the same latency stru
 ## Notes
 
 - Qwen3Guard-Gen output is short (`Safety: X\nCategories: Y\nRefusal: Z`), so `max_new_tokens=32` is the default.
-- Stream-ONNX export is deferred — the stateful `stream_moderate_from_ids` API and four classification heads require a custom wrapper. See `scripts/export_stream_onnx.py`.
+- Stream-ONNX export is deferred — the stateful `stream_moderate_from_ids` API and four classification heads require a custom wrapper.
 - Reports live in `docs/` (`REPORT.md` is the index; Gen and Stream each have their own self-contained write-up).
-- The CPU Gen benchmark exports with task `text-generation` (plain forward, no past-KV) and runs the L2 single-forward path — a KV cache is irrelevant when there is no decode loop.
-- `src/bench_gen_onnx.py` is the legacy GPU ONNX path: it benchmarks `generate()` over a no-past export, so its decode is O(N²) per token. Kept for the GPU report; the CPU work uses `bench_gen_cpu.py` instead.
+- The CPU Gen benchmark exports with task `text-generation` (plain forward, no past-KV) and runs the L2 single-forward path. L2-lastpos restricts the output projection to the verdict row when the runtime supports it.

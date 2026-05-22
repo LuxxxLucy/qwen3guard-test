@@ -94,8 +94,7 @@ def main() -> int:
     basename = Path(args.model_id).name
 
     if args.gguf_repo:
-        files = args.gguf_file if isinstance(args.gguf_file, list) else [args.gguf_file]
-        for quant, fname in zip(args.quants, files):
+        for quant, fname in zip(args.quants, [args.gguf_file]):
             download_community(args.gguf_repo, fname,
                                OUT_DIR / f"{basename}.{quant}.gguf")
         return 0

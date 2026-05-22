@@ -33,9 +33,8 @@
 #   MODEL_ID=Qwen/Qwen3Guard-Gen-4B bash ...               # full HF id override
 
 set -euo pipefail
-cd "$(dirname "$0")"
-export PYTHONUNBUFFERED=1
-export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
+source "$(dirname "$0")/lib.sh"
+qg_setup_env
 
 LENGTHS="${LENGTHS:-32 64 128 256 512 1024 2048 4096}"
 CORRECTNESS_N="${CORRECTNESS_N:-20}"
@@ -48,14 +47,7 @@ MODEL_ID="${MODEL_ID:-Qwen/Qwen3Guard-Gen-${MODEL_SIZE}}"
 # L3 (torch.compile) is skipped on CPU: first-call inductor compilation is
 # multi-minute on CPU and the steady-state speedup is marginal. On CUDA the
 # same flag turns on kernel fusion + CUDA graphs.
-DEVICE="${DEVICE:-auto}"
-if [[ "$DEVICE" == "auto" ]]; then
-    if uv run python -c 'import torch; exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
-        DEVICE="cuda"
-    else
-        DEVICE="cpu"
-    fi
-fi
+DEVICE="${DEVICE:-$(qg_detect_device)}"
 echo "[run_optim_ladder_gen] device=$DEVICE model=$MODEL_ID"
 
 echo "===================================================================="
@@ -76,10 +68,8 @@ run_level () {
     local flags="$2"
     echo ""
     echo "---- $tag : $flags ----"
-    echo "[representative]"
     uv run python src/bench_gen_pytorch.py \
         --model-id "$MODEL_ID" --opt-level "$tag" --device "$DEVICE" $flags
-    echo "[length sweep]"
     uv run python src/bench_gen_pytorch.py \
         --model-id "$MODEL_ID" --opt-level "$tag" --device "$DEVICE" \
         --lengths $LENGTHS $flags

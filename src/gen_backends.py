@@ -2,8 +2,8 @@
 
 Every backend runs ONE forward over `forced_ids` (= tokenize(prompt + "Safety: "))
 and reads the 3 verdict logits at the last position. No decode loop, no KV cache
-— this is the L2 path REPORT_GEN settles on. Backends differ only in the runtime
-that executes the forward:
+— this is the optimized L2 path. Backends differ only in the runtime that
+executes the forward:
 
   pytorch   — transformers AutoModelForCausalLM, float32 eager
   onnx      — ONNX Runtime, CPUExecutionProvider (fp32 / int8 / int4 weights)
@@ -20,34 +20,19 @@ an IO binding. Neither re-feeds or copies the prefix per request.
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from pathlib import Path
 
-
-# L0 unoptimized mode: greedy generate() decode loop of this many tokens.
-L0_MAX_NEW_TOKENS = 32
+from contract import DEFAULT_PRECISION, L0_MAX_NEW_TOKENS, RUNTIMES, Runtime
 
 
-# Default precision tag when --precision is not given, per runtime.
-DEFAULT_PRECISION = {
-    "pytorch": "fp32",
-    "onnx": "fp32",
-    "openvino": "fp16",
-    "llamacpp": "f16",
-}
-
-# provider/runtime string written into BenchResult.provider.
-PROVIDER_TAG = {
-    "pytorch": "torch-cpu",
-    "onnx": "CPUExecutionProvider",
-    "openvino": "OpenVINO-CPU",
-    "llamacpp": "llama.cpp-cpu",
-}
-
-
-class GenBackend:
+class GenBackend(ABC):
     """Base class. A backend reads the 3 verdict logits for one L2 forward."""
 
-    runtime = "base"
+    SUPPORTS_KV_CACHE: bool = False
+    SUPPORTS_L0: bool = False
+    SUPPORTS_LAST_POS_LOGITS: bool = False
+    runtime: str = "base"
 
     def __init__(self, precision: str, verdict_token_ids: list[int],
                  threads: int | None, kv_cache: bool = False,
@@ -60,9 +45,11 @@ class GenBackend:
         self.last_pos_logits = last_pos_logits
         self.detail = ""  # runtime/version string for the result JSON
 
+    @abstractmethod
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         raise NotImplementedError
 
+    @abstractmethod
     def verdict_logits(self, forced_ids: list[int]) -> list[float]:
         """Last-position logits for the 3 verdict token ids, in VERDICT_LABELS
         order. The forward pass plus this read is the timed region."""
@@ -76,7 +63,8 @@ class GenBackend:
     def decode_l0(self, plain_ids: list[int]) -> int:
         """L0 unoptimized mode: greedy generate() decode loop of
         L0_MAX_NEW_TOKENS tokens — the model-card path. The full decode is the
-        timed unit; the return value is unused (L0 skips the verify check)."""
+        timed unit; the returned verdict index satisfies predict()'s interface,
+        but L0 skips the verify check."""
         raise NotImplementedError(f"{self.runtime} backend has no L0 mode")
 
     def predict(self, forced_ids: list[int]) -> int:
@@ -94,6 +82,8 @@ class GenBackend:
 
 class PyTorchCPUBackend(GenBackend):
     runtime = "pytorch"
+    SUPPORTS_L0 = True
+    SUPPORTS_LAST_POS_LOGITS = True
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         import torch
@@ -134,6 +124,7 @@ class PyTorchCPUBackend(GenBackend):
 
 class OnnxCPUBackend(GenBackend):
     runtime = "onnx"
+    SUPPORTS_KV_CACHE = True
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         import numpy as np
@@ -220,6 +211,7 @@ class OnnxCPUBackend(GenBackend):
 
 class OpenVINOCPUBackend(GenBackend):
     runtime = "openvino"
+    SUPPORTS_L0 = True
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         import torch
@@ -255,6 +247,8 @@ class OpenVINOCPUBackend(GenBackend):
 
 class LlamaCppBackend(GenBackend):
     runtime = "llamacpp"
+    SUPPORTS_KV_CACHE = True
+    SUPPORTS_L0 = True
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         from llama_cpp import Llama
@@ -321,32 +315,27 @@ class LlamaCppBackend(GenBackend):
         return 0
 
 
-_BACKENDS = {
-    "pytorch": PyTorchCPUBackend,
-    "onnx": OnnxCPUBackend,
-    "openvino": OpenVINOCPUBackend,
-    "llamacpp": LlamaCppBackend,
-}
+_BACKENDS: dict[Runtime, type[GenBackend]] = dict(zip(
+    RUNTIMES,
+    (PyTorchCPUBackend, OnnxCPUBackend, OpenVINOCPUBackend, LlamaCppBackend),
+    strict=True,
+))
 
 
 def make_backend(runtime: str, precision: str | None,
                  verdict_token_ids: list[int], threads: int | None,
                  kv_cache: bool = False, unoptimized: bool = False,
                  last_pos_logits: bool = False) -> GenBackend:
-    if runtime not in _BACKENDS:
-        raise SystemExit(f"unknown runtime {runtime!r}; "
-                         f"choose from {sorted(_BACKENDS)}")
-    if kv_cache and runtime not in ("llamacpp", "onnx"):
-        raise SystemExit(f"--kv-cache is implemented for --runtime llamacpp "
-                         f"and onnx only, not {runtime!r}.")
-    if unoptimized and runtime == "onnx":
-        raise SystemExit("--unoptimized (L0 generate() decode loop) is "
-                         "implemented for pytorch, openvino, llamacpp only, "
-                         "not onnx.")
-    if last_pos_logits and runtime != "pytorch":
-        raise SystemExit("--last-pos-logits is pytorch-only: onnx/openvino "
-                         "bake the last-position projection into the export, "
-                         "llama.cpp always projects only the last token.")
+    cls = _BACKENDS.get(runtime)
+    if cls is None:
+        raise SystemExit(f"unknown runtime {runtime!r}; choose from {sorted(_BACKENDS)}")
+    requested = {
+        "--kv-cache":        (kv_cache,        "SUPPORTS_KV_CACHE"),
+        "--unoptimized":     (unoptimized,     "SUPPORTS_L0"),
+        "--last-pos-logits": (last_pos_logits, "SUPPORTS_LAST_POS_LOGITS"),
+    }
+    for flag, (on, cap) in requested.items():
+        if on and not getattr(cls, cap):
+            raise SystemExit(f"{flag} is not supported by --runtime {runtime}.")
     prec = precision or DEFAULT_PRECISION[runtime]
-    return _BACKENDS[runtime](prec, verdict_token_ids, threads, kv_cache,
-                              unoptimized, last_pos_logits)
+    return cls(prec, verdict_token_ids, threads, kv_cache, unoptimized, last_pos_logits)

@@ -8,15 +8,12 @@ varies across runtimes is the forward pass itself.
 """
 from __future__ import annotations
 
+from contract import Template, TEMPLATES
+
 
 # Qwen3Guard-Gen is a 3-way classifier. The verdict is the first
 # information-bearing token after "Safety: ".
 VERDICT_LABELS: tuple[str, ...] = ("Safe", "Unsafe", "Controversial")
-
-# Selectable input templates (--template). Both render to the same shape and
-# end at the assistant `<think>` block, so appending "Safety: " lands at the
-# start of the verdict line either way; they differ only in policy-block length.
-TEMPLATES: tuple[str, ...] = ("original", "test-200")
 
 # `test-200`: a compressed safety policy. The built-in Qwen3Guard template adds
 # ~296 fixed tokens; this one adds ~130, so a representative input (~68 user
@@ -41,7 +38,7 @@ _TEST_200_POST = (
 )
 
 
-def render_prompt(tokenizer, user_text: str, template: str = "original") -> str:
+def render_prompt(tokenizer, user_text: str, template: Template = "original") -> str:
     """Render the classifier input for `user_text`.
 
     `template="original"` applies the model's built-in Qwen3Guard chat template
@@ -95,7 +92,9 @@ def discover_forced_prefix(
     return tokenized["Safe"][:diff_pos], diff_pos, verdict_ids
 
 
-def build_forced_ids(tokenizer, user_text: str, template: str = "original") -> list[int]:
+def build_forced_ids(
+    tokenizer, user_text: str, template: Template = "original",
+) -> list[int]:
     """Token sequence for `render_prompt(user_text) + "Safety: "` — the L2
     forced-prefix input. One forward over these ids reads the verdict."""
     forced_ids, _, _ = discover_forced_prefix(
@@ -104,7 +103,9 @@ def build_forced_ids(tokenizer, user_text: str, template: str = "original") -> l
     return forced_ids
 
 
-def build_plain_ids(tokenizer, user_text: str, template: str = "original") -> list[int]:
+def build_plain_ids(
+    tokenizer, user_text: str, template: Template = "original",
+) -> list[int]:
     """Token sequence for the plain rendered prompt, no trailing "Safety: " —
     the L0 decode-loop input."""
     return tokenizer.encode(
@@ -124,7 +125,9 @@ def common_prefix(seqs: list[list[int]]) -> list[int]:
     return first[:p]
 
 
-def discover_verdict_token_ids(tokenizer, template: str = "original") -> dict[str, int]:
+def discover_verdict_token_ids(
+    tokenizer, template: Template = "original",
+) -> dict[str, int]:
     """Discover the 3 verdict token ids (Safe / Unsafe / Controversial).
 
     The ids are tokenizer-dependent but prompt-independent in practice (the

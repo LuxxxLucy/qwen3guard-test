@@ -9,11 +9,9 @@ This check, for the representative inputs, recomputes the 3 verdict logits with
 a full-sequence PyTorch fp32 forward (the reference, independent of the
 backends) and compares them to the backend under test. pytorch and onnx fp32
 must reproduce the reference logits within tolerance — that proves the slice is
-value-preserving. OpenVINO's "fp32" export keeps fp16 weights (optimum-intel
-default), and quantized backends drift for the int8/int4 accuracy tradeoff;
-both sit a little off the fp32 reference for a weight-precision reason, not a
-slice error, so they are gated only against gross corruption. Exit non-zero on
-failure — this is a gate.
+value-preserving. fp16-weighted and quantized backends can drift for a
+weight-precision reason, not a slice error, so they are gated only against gross
+corruption. Exit non-zero on failure — this is a gate.
 
 Usage:
   uv run python src/verify_lm_head.py --runtime pytorch
@@ -29,8 +27,9 @@ import sys
 from pathlib import Path
 
 from bench_common import load_representative_texts
-from gen_backends import DEFAULT_PRECISION, make_backend
-from gen_common import (TEMPLATES, VERDICT_LABELS, build_forced_ids,
+from contract import DEFAULT_PRECISION, RUNTIMES, TEMPLATES
+from gen_backends import make_backend
+from gen_common import (VERDICT_LABELS, build_forced_ids,
                         discover_verdict_token_ids)
 
 # An fp32 backend should reproduce the reference verdict logits to fp noise —
@@ -78,12 +77,11 @@ def reference_logits(model_id: str, samples: list[list[int]],
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runtime", required=True,
-                    choices=["pytorch", "onnx", "openvino", "llamacpp"])
+    ap.add_argument("--runtime", required=True, choices=list(RUNTIMES))
     ap.add_argument("--precision", default=None)
     ap.add_argument("--artifact", default=None)
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B")
-    ap.add_argument("--template", default="test-200", choices=list(TEMPLATES))
+    ap.add_argument("--template", default=TEMPLATES[1], choices=list(TEMPLATES))
     ap.add_argument("--n-samples", type=int, default=100)
     ap.add_argument("--threads", type=int, default=None)
     args = ap.parse_args()
@@ -103,7 +101,7 @@ def main() -> int:
     # pytorch backend defaults to the full-sequence projection now; the gate's
     # job is to verify the last-position projection, so request it explicitly.
     backend = make_backend(args.runtime, precision, vids, args.threads,
-                           last_pos_logits=(args.runtime == "pytorch"))
+                           last_pos_logits=(args.runtime == RUNTIMES[0]))
     backend.load(args.model_id, args.artifact, max(len(s) for s in samples))
 
     max_logit_diff = 0.0
@@ -117,25 +115,22 @@ def main() -> int:
 
     n = len(samples)
     # The strict logit gate only isolates the slice where the backend truly
-    # reproduces fp32: pytorch and onnx fp32. OpenVINO's "fp32" export keeps
-    # fp16 weights (optimum-intel default), so its verdict logits sit ~0.6 off
-    # a true-fp32 reference — a weight-precision gap, not a slice error.
-    strict_fp32 = precision == "fp32" and args.runtime != "openvino"
+    # reproduces fp32: pytorch and onnx fp32.
+    strict_fp32 = precision == "fp32"
     if strict_fp32:
         # fp32 has no quantization noise — the sliced output must reproduce the
         # full-sequence reference exactly. This is the lm_head-slice proof.
         ok = argmax_match == n and max_logit_diff <= FP32_ATOL
         gate = f"fp32: argmax {n}/{n} and max logit diff <= {FP32_ATOL}"
     else:
-        # Quantized weights — and OpenVINO's fp16-stored "fp32" — flip some
-        # borderline verdicts vs the fp32 reference. A weight-precision effect,
-        # not a slice error (the slice is weight-independent and proven strict
-        # at pytorch/onnx fp32). Gate only against gross corruption.
+        # fp16-weighted and quantized backends can flip some borderline verdicts
+        # vs the fp32 reference. A weight-precision effect, not a slice error
+        # (the slice is weight-independent and proven strict at pytorch/onnx
+        # fp32). Gate only against gross corruption.
         ok = argmax_match >= QUANT_SANITY * n
-        why = ("OpenVINO stores fp32-export weights as fp16"
-               if precision == "fp32" else "quantized weights drift vs fp32")
         gate = (f"argmax >= {QUANT_SANITY:.0%} corruption tripwire "
-                f"({why} — sub-100% drift vs the fp32 reference is expected)")
+                "(fp16/quantized weights drift vs fp32 — sub-100% drift vs the "
+                "fp32 reference is expected)")
     print(f"[verify-lm-head] verdict argmax match vs reference: {argmax_match}/{n}")
     print(f"[verify-lm-head] max verdict-logit diff vs reference: {max_logit_diff:.4g}")
     print(f"[verify-lm-head] gate — {gate}")
