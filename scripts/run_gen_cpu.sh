@@ -68,6 +68,13 @@ section "1/8  uv sync (llama-cpp-python built from source)"
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
 # pyproject makes the rebuild native; --reinstall-package forces it even when a
 # wheel is already installed, which a plain `uv sync` would keep.
+# CMAKE_ARGS adds a BLAS backend for the fp16/fp32 prefill GEMM — Accelerate on
+# macOS, OpenBLAS on Linux (apt: libopenblas-dev) — the f16 GGUF fast path.
+if [[ "$(uname)" == "Darwin" ]]; then
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
+else
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+fi
 uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
 LEDGER+=("PASS  uv sync")
@@ -83,9 +90,9 @@ section "4/8  export OpenVINO (fp32, int8)"
 step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp32 int8
 
-section "5/8  export GGUF (q8_0)"
+section "5/8  export GGUF (f16, q8_0)"
 step "export gguf" uv run python scripts/export_gen_gguf.py \
-    --model-id "$MODEL_ID" --quants q8_0
+    --model-id "$MODEL_ID" --quants f16 q8_0
 
 section "6/8  build Rust candle backend"
 step "cargo build" bash -c "cd rust && cargo build --release"
@@ -115,6 +122,9 @@ gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0
 # llama.cpp again with the shared system-prompt prefix KV-cached.
 gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --kv-cache
 gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --unoptimized
+# f16 GGUF — with a BLAS backend its prefill GEMM is the fastest CPU path.
+gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"
+gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"    --kv-cache
 
 echo "--- Gen: rust-candle ---"
 step "gen rust-candle" rust/target/release/qwen3guard-bench \

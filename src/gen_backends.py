@@ -258,10 +258,14 @@ class LlamaCppBackend(GenBackend):
                              f"(run scripts/export_gen_gguf.py first).")
         # n_ctx must cover the longest forced_ids sequence; round up for headroom.
         n_ctx = max(2048, ((max_seq_len + 256) // 256 + 1) * 256)
+        # n_threads_batch governs prefill (the whole L2 path); pin it to the
+        # same physical-core count as n_threads so llama.cpp is measured on the
+        # same thread budget as the other backends, not the default logical count.
         self.llm = Llama(
             model_path=str(artifact),
             n_ctx=n_ctx,
             n_threads=self.threads or None,
+            n_threads_batch=self.threads or None,
             n_gpu_layers=0,
             verbose=False,
         )

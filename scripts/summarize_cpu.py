@@ -24,6 +24,8 @@ ROWS: list[tuple[tuple[str, str, str, bool], str]] = [
     (("llamacpp",    "q8_0",   "L0", False), "llamacpp (L0)"),
     (("llamacpp",    "q8_0",   "L2", False), "llamacpp q8_0"),
     (("llamacpp",    "q8_0",   "L2", True),  "llamacpp q8_0 +kv"),
+    (("llamacpp",    "f16",    "L2", False), "llamacpp f16"),
+    (("llamacpp",    "f16",    "L2", True),  "llamacpp f16 +kv"),
     (("rust-candle", "fp32",   "L0", False), "rust-candle (L0)"),
     (("rust-candle", "fp32",   "L2", True),  "rust-candle (L2)"),
 ]
