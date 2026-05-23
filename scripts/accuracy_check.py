@@ -51,12 +51,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# Reuse the verdict-label set, the forced-prefix probe, and the regex
-# extractor. We deliberately do NOT reuse predict_naive / predict_forced_prefix,
-# because those wrap prompt-moderation rendering; this script needs
-# response-moderation rendering instead.
-from bench_gen_pytorch import extract_verdict  # noqa: E402
-from gen_common import VERDICT_LABELS, discover_forced_prefix  # noqa: E402
+from gen_common import (  # noqa: E402
+    VERDICT_LABELS, discover_forced_prefix, extract_verdict,
+)
 
 
 def autodetect_device() -> str:

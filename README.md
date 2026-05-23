@@ -97,12 +97,10 @@ qwen3guard-test/
 │   ├── REPORT_GEN.md        # Gen-variant findings
 │   └── REPORT_STREAM.md     # Stream-variant findings
 ├── scripts/
-│   ├── run_all.sh           # GPU runner — one line per combo
+│   ├── run_all.sh           # Stream headline runner (CPU or CUDA)
 │   ├── run_gen_cpu.sh       # CPU runner — sync, export, benchmark, summarize
-│   ├── run_optim_ladder_gen.sh
 │   ├── run_optim_ladder_stream.sh
 │   ├── download.py          # pre-fetch weights + dataset
-│   ├── correctness_test.py  # L0/L1/L2 cached+uncached verdict equivalence
 │   ├── accuracy_check.py    # labeled-data accuracy probe
 │   ├── export_gen_onnx.py     # Gen → ONNX (fp32 / int8 / int4)
 │   ├── export_gen_openvino.py # Gen → OpenVINO IR (fp16 / int8 / int4)
@@ -114,7 +112,6 @@ qwen3guard-test/
 │   ├── gen_common.py        # Gen chat-template + forced-prefix helpers
 │   ├── gen_backends.py      # CPU runtimes: pytorch / onnx / openvino / llamacpp
 │   ├── bench_gen_cpu.py     # multi-runtime CPU Gen benchmark
-│   ├── bench_gen_pytorch.py
 │   └── bench_stream_pytorch.py          # shipped-API path
 ├── figures/                 # PNGs embedded by reports
 └── results/                 # JSON output (gitignored)

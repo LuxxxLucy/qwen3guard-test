@@ -36,6 +36,7 @@ dependencies = [
     "llama-cpp-python>=0.3",
     "accelerate>=0.30",
     "sentencepiece>=0.2",
+    "onnxruntime-genai>=0.13.1",
 ]
 
 [build-system]

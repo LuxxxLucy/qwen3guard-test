@@ -65,25 +65,29 @@ qg_step "uv sync" true
 qg_section "2/8  download weights + Qwen3GuardTest dataset"
 qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
 
-qg_section "3/8  export ONNX (fp32, int8, with-past)"
+qg_section "3/9  export ONNX (fp32, int8, with-past)"
 qg_step "export onnx" uv run python scripts/export_gen_onnx.py \
     --model-id "$MODEL_ID" --precisions fp32 int8 --with-past
 
-qg_section "4/8  export OpenVINO (fp16, int8)"
+qg_section "4/9  export ONNX Runtime GenAI (fp32, prune_lm_head)"
+qg_step "export onnx-genai" uv run python scripts/export_gen_onnx_genai.py \
+    --model-id "$MODEL_ID" --precisions fp32
+
+qg_section "5/9  export OpenVINO (fp16, int8)"
 qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp16 int8
 
-qg_section "5/8  export GGUF (f16, q8_0)"
+qg_section "6/9  export GGUF (f16, q8_0)"
 qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
     --model-id "$MODEL_ID" --quants f16 q8_0
 
-qg_section "6/8  build Rust candle backend"
+qg_section "7/9  build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
-qg_section "7/8  dump Rust benchmark inputs"
+qg_section "8/9  dump Rust benchmark inputs"
 qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
 
-qg_section "8/8  benchmarks"
+qg_section "9/9  benchmarks"
 gen() {
     qg_step "gen $*" uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
         --n-samples "$N_SAMPLES" --threads "$THREADS" --verify \
@@ -104,6 +108,11 @@ gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withp
 # ONNX L0 baseline: hand-rolled decode loop over the with-past graph — same
 # per-call KV behaviour as generate(use_cache=True) on the other backends.
 gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withpast" --unoptimized
+# onnx-genai (microsoft/onnxruntime-genai). Built with prune_lm_head=true, so
+# L2 (lastpos) is baked into both the L0 decode loop and the L1 forced-prefix
+# row. Cross-call prefix-KV reuse is not in the GenAI Generator API; no L3.
+gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32"
+gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32" --unoptimized
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16"
 gen --runtime openvino --precision int8  --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16" --unoptimized
@@ -119,6 +128,16 @@ echo "--- Gen: rust-candle ---"
 qg_step "gen rust-candle" rust/target/release/qwen3guard-bench \
     --input rust/bench_inputs.json --out-dir results "${DRY_RUST[@]}"
 echo
+
+# vLLM CPU: single-row baseline, no trick ladder. vLLM bakes its own paged
+# attention, KV management, and last-position sampling. The Qwen3-supporting
+# vLLM releases (>=0.10) require torch>=2.7 — currently only on Linux x86/arm64
+# wheels — so this is skipped on Mac and gets enabled on Kunpeng.
+if uv run python -c "import vllm" 2>/dev/null; then
+    gen --runtime vllm-cpu --precision fp16
+else
+    echo "[skip] vllm not importable on this host (Qwen3 needs vllm>=0.10, which needs torch>=2.7; install separately for Kunpeng)."
+fi
 
 qg_section "step ledger"
 qg_ledger_print

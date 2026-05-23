@@ -125,6 +125,26 @@ def common_prefix(seqs: list[list[int]]) -> list[int]:
     return first[:p]
 
 
+def extract_verdict(generated_text: str) -> str:
+    """Parse the Qwen3Guard-Gen response to extract the verdict.
+
+    Qwen3Guard-Gen is a 3-way classifier — the model emits
+    `Safety: Safe\\n...`, `Safety: Unsafe\\n...`, or
+    `Safety: Controversial\\n...`.
+    """
+    t = generated_text.strip()
+    if t.startswith("Safety:"):
+        after = t[len("Safety:"):].strip()
+        first_word = after.split()[0] if after else ""
+        return first_word  # "Safe" / "Unsafe" / "Controversial"
+    # Fallback: check the more specific labels first so "Safe" doesn't
+    # shadow a "Controversial" / "Unsafe" that appears later in the text.
+    for v in ("Controversial", "Unsafe", "Safe"):
+        if v in t:
+            return v
+    return f"OTHER({t[:40]!r})"
+
+
 def discover_verdict_token_ids(
     tokenizer, template: Template = "original",
 ) -> dict[str, int]:

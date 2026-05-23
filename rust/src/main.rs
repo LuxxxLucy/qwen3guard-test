@@ -38,14 +38,16 @@ struct TemplateInputs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptLevel {
     L0,
-    L2,
+    L1,
+    L3,
 }
 
 impl OptLevel {
     fn as_str(self) -> &'static str {
         match self {
             Self::L0 => "L0",
-            Self::L2 => "L2",
+            Self::L1 => "L1",
+            Self::L3 => "L3",
         }
     }
 }
@@ -291,7 +293,7 @@ fn run_l2(
     Ok(make_result(
         dump,
         template_name,
-        OptLevel::L2,
+        OptLevel::L3,
         true,
         n_samples,
         n_warmup,
@@ -413,7 +415,7 @@ fn run_l2_no_kv(
     Ok(make_result(
         dump,
         template_name,
-        OptLevel::L2,
+        OptLevel::L1,
         false,
         n_samples,
         n_warmup,

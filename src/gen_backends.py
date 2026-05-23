@@ -253,6 +253,61 @@ class OnnxCPUBackend(GenBackend):
         return 0
 
 
+class OnnxGenAICPUBackend(GenBackend):
+    """ONNX Runtime GenAI (microsoft/onnxruntime-genai) CPU backend.
+
+    Build the model with `python -m onnxruntime_genai.models.builder` and
+    `prune_lm_head=true` so the LM head only computes last-token logits during
+    prefill — that bakes the L2 (lastpos) trick into the L0 baseline. Forward
+    one pass over `forced_ids` via the Generator's `append_tokens` +
+    `generate_next_token`; the per-call logits at the last position are then
+    read via `get_logits()` and the 3 verdict ids extracted.
+    """
+    runtime = "onnx-genai"
+    SUPPORTS_L0 = True
+
+    def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
+        import numpy as np
+        import onnxruntime_genai as og
+        if not artifact:
+            raise SystemExit("[onnx-genai] --artifact (model build dir) is required.")
+        artifact_dir = Path(artifact)
+        if not (artifact_dir / "genai_config.json").exists():
+            raise SystemExit(
+                f"[onnx-genai] genai_config.json not found in {artifact_dir} "
+                f"(run scripts/export_gen_onnx_genai.py first).")
+        self._np = np
+        self._og = og
+        self.model = og.Model(str(artifact_dir))
+        # One generator is reused for every call. `rewind_to(0)` clears its
+        # per-call KV before each prefill — cheaper than allocating a new one.
+        self._params = og.GeneratorParams(self.model)
+        self._params.set_search_options(max_length=max_seq_len + 1, min_length=1)
+        self._gen = og.Generator(self.model, self._params)
+        self.detail = f"onnxruntime-genai {og.__version__}"
+
+    def verdict_logits(self, forced_ids: list[int]) -> list[float]:
+        # rewind_to(0) discards any KV from the previous call and starts fresh.
+        self._gen.rewind_to(0)
+        self._gen.append_tokens(forced_ids)
+        # append_tokens runs the prefill forward; get_logits then yields the
+        # last-position logits over the full vocab.
+        row = self._np.asarray(self._gen.get_logits()).reshape(-1)
+        return [float(row[v]) for v in self.verdict_token_ids]
+
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        """L0: greedy decode loop driven by the GenAI Generator. append_tokens
+        runs prefill, then generate_next_token steps the model L0-1 times for
+        a total of L0_MAX_NEW_TOKENS decode steps (matches the other backends)."""
+        self._gen.rewind_to(0)
+        self._gen.append_tokens(plain_ids)
+        for _ in range(L0_MAX_NEW_TOKENS - 1):
+            if self._gen.is_done():
+                break
+            self._gen.generate_next_token()
+        return 0
+
+
 class OpenVINOCPUBackend(GenBackend):
     runtime = "openvino"
     SUPPORTS_L0 = True
@@ -287,6 +342,55 @@ class OpenVINOCPUBackend(GenBackend):
             max_new_tokens=L0_MAX_NEW_TOKENS, do_sample=False, num_beams=1,
         )
         return 0
+
+
+class VLLMCPUBackend(GenBackend):
+    """vLLM CPU backend — single-row, all-tricks-baked baseline.
+
+    Skips the trick ladder. vLLM bakes its own paged-attention KV management
+    and last-position sampling; the forced-prefix forward + sampling is the
+    timed unit. The next-token argmax IS the verdict (the "Safety: " forcing
+    constrains the model output to Safe / Unsafe / Controversial).
+
+    Expects nothing under `--artifact`; vLLM resolves `--model-id` against the
+    HF hub cache directly.
+    """
+    runtime = "vllm-cpu"
+
+    def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
+        # Import lazily — vLLM's import is slow (3-5s) and pulls torch/cuda
+        # plumbing even on CPU.
+        from vllm import LLM, SamplingParams
+        from vllm.inputs import TokensPrompt
+        self._TokensPrompt = TokensPrompt
+        self.llm = LLM(
+            model=model_id,
+            dtype="float16",
+            enforce_eager=True,
+            max_model_len=max(2048, max_seq_len + 16),
+            disable_log_stats=True,
+        )
+        self._sp = SamplingParams(temperature=0.0, max_tokens=1)
+        import vllm
+        self.detail = f"vllm {vllm.__version__} cpu"
+
+    def predict(self, forced_ids: list[int]) -> int:
+        """vLLM produces argmax tokens directly. With "Safety: " forced in the
+        prompt, the next token is Safe / Unsafe / Controversial; we return the
+        verdict index. Falls back to 0 if vLLM emits something unexpected."""
+        out = self.llm.generate(
+            [self._TokensPrompt(prompt_token_ids=forced_ids)],
+            self._sp, use_tqdm=False,
+        )
+        next_id = out[0].outputs[0].token_ids[0]
+        try:
+            return self.verdict_token_ids.index(next_id)
+        except ValueError:
+            return 0
+
+    def verdict_logits(self, forced_ids: list[int]) -> list[float]:
+        # Not called — predict() is overridden directly. Stub satisfies the ABC.
+        raise NotImplementedError("vLLM backend exposes predict() directly")
 
 
 class LlamaCppBackend(GenBackend):
@@ -361,7 +465,8 @@ class LlamaCppBackend(GenBackend):
 
 _BACKENDS: dict[Runtime, type[GenBackend]] = dict(zip(
     RUNTIMES,
-    (PyTorchCPUBackend, OnnxCPUBackend, OpenVINOCPUBackend, LlamaCppBackend),
+    (PyTorchCPUBackend, OnnxCPUBackend, OnnxGenAICPUBackend,
+     OpenVINOCPUBackend, LlamaCppBackend, VLLMCPUBackend),
     strict=True,
 ))
 

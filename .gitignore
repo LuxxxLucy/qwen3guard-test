@@ -31,3 +31,8 @@ status.md
 # kernels/ — code (*.sh, *.py) is tracked; docs and profiling output are local
 kernels/*.md
 kernels/profile/
+
+# Generated artifacts that should not be tracked
+.DS_Store
+ortgenai_models/
+cache_dir/

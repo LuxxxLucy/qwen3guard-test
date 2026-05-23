@@ -27,7 +27,6 @@ qg_detect_threads() {
 }
 
 qg_detect_device() {
-    # Use the same logic as the existing auto-detect in run_optim_ladder_gen.sh
     uv run python -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu
 }
 

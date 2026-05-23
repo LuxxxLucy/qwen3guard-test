@@ -44,12 +44,16 @@ from gen_common import (
 
 
 def opt_level_of(args) -> OptLevel:
-    """Result-JSON opt_level tag for this run's mode: L0 (generate decode
-    loop), L2 (forced-prefix forward), or L2-lastpos (forced-prefix forward
-    with the output projection restricted to the last position)."""
+    """Result-JSON opt_level tag for this run on the cumulative ladder:
+    L0 (decode loop), L1 (forced-prefix), L2 (+lastpos), L3 (+prefix-KV).
+    --kv-cache implies the full preceding stack on backends that support it."""
     if args.unoptimized:
         return "L0"
-    return "L2-lastpos" if args.last_pos_logits else "L2"
+    if args.kv_cache:
+        return "L3"
+    if args.last_pos_logits:
+        return "L2"
+    return "L1"
 
 
 def build_samples(tok, n_samples: int, length: int | None,

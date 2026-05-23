@@ -9,25 +9,44 @@ from dataclasses import dataclass, asdict
 from typing import Literal
 
 # --- opt levels ------------------------------------------------------------
-OptLevel = Literal["LP", "L0", "L1", "L2", "L2-lastpos", "L3"]
-OPT_LEVELS: tuple[OptLevel, ...] = ("LP", "L0", "L1", "L2", "L2-lastpos", "L3")
+# Strictly cumulative ladder. Each level adds one trick on top of the previous.
+# Backends that bake a trick into export (e.g. ONNX/OV bake lastpos) skip the
+# corresponding stand-alone row; the bake is annotated in the report legend.
+#
+#   L0  unoptimized — generate() decode loop (~32 tokens), parse "Safety: <v>".
+#   L1  +forced-prefix — one forward over `prompt + "Safety: "`, read 3 logits.
+#   L2  +lastpos lm_head — only project the last position to vocab.
+#   L3  +shared system-prompt KV cache — precompute prefix KV once, reuse.
+#
+# A vocab-subset projection trick (project only the 3 verdict-token rows of
+# lm_head) was measured on PyTorch CPU and dropped — theoretical savings
+# (~0.8 ms over the ~150 MFLOP lm_head) sit below the noise floor and the
+# extra Python path made the wall-clock worse. See plan.md "Dropped".
+OptLevel = Literal["L0", "L1", "L2", "L3"]
+OPT_LEVELS: tuple[OptLevel, ...] = ("L0", "L1", "L2", "L3")
 
 # --- runtimes --------------------------------------------------------------
-Runtime = Literal["pytorch", "onnx", "openvino", "llamacpp"]
-RUNTIMES: tuple[Runtime, ...] = ("pytorch", "onnx", "openvino", "llamacpp")
+Runtime = Literal["pytorch", "onnx", "onnx-genai", "openvino", "llamacpp", "vllm-cpu"]
+RUNTIMES: tuple[Runtime, ...] = (
+    "pytorch", "onnx", "onnx-genai", "openvino", "llamacpp", "vllm-cpu",
+)
 
 DEFAULT_PRECISION: dict[Runtime, str] = {
-    "pytorch":  "fp32",
-    "onnx":     "fp32",
-    "openvino": "fp16",
-    "llamacpp": "f16",
+    "pytorch":    "fp32",
+    "onnx":       "fp32",
+    "onnx-genai": "fp32",
+    "openvino":   "fp16",
+    "llamacpp":   "f16",
+    "vllm-cpu":   "fp16",
 }
 
 PROVIDER_TAG: dict[Runtime, str] = {
-    "pytorch":  "torch-cpu",
-    "onnx":     "CPUExecutionProvider",
-    "openvino": "OpenVINO-CPU",
-    "llamacpp": "llama.cpp-cpu",
+    "pytorch":    "torch-cpu",
+    "onnx":       "CPUExecutionProvider",
+    "onnx-genai": "ort-genai-cpu",
+    "openvino":   "OpenVINO-CPU",
+    "llamacpp":   "llama.cpp-cpu",
+    "vllm-cpu":   "vllm-cpu",
 }
 
 # --- templates -------------------------------------------------------------
