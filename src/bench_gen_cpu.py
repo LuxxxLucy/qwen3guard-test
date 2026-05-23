@@ -27,7 +27,7 @@ from contract import (
     L0_MAX_NEW_TOKENS, PROVIDER_TAG, RUNTIMES, TEMPLATES, OptLevel,
     ResultExtra, Template,
 )
-from gen_backends import PyTorchCPUBackend, make_backend
+from gen_backends import make_backend
 from gen_common import (
     VERDICT_LABELS, build_forced_ids, build_plain_ids, common_prefix,
     discover_verdict_token_ids,
@@ -56,15 +56,6 @@ def build_samples(tok, n_samples: int, length: int | None,
     if unoptimized:
         return [build_plain_ids(tok, t, template) for t in texts]
     return [build_forced_ids(tok, t, template) for t in texts]
-
-
-def verify_against_pytorch(ref, backend, samples: list[list[int]]) -> None:
-    """Cross-check: same verdict argmax as PyTorch-CPU fp32 on 10 samples.
-    Reports agreement — quantization may flip borderline samples, not a crash."""
-    probe = samples[:10]
-    agree = sum(ref.predict(s) == backend.predict(s) for s in probe)
-    tag = "OK" if agree == len(probe) else "DRIFT"
-    print(f"[verify] verdict argmax vs pytorch-cpu fp32: {agree}/{len(probe)} {tag}")
 
 
 def run_cell(backend, samples: list[list[int]], args, length: int | None,
@@ -127,14 +118,12 @@ def main() -> int:
                     help="pytorch only: project only the last position to vocab. "
                          "Off: full-sequence projection (the L1 before-row).")
     ap.add_argument("--out-dir", default="results")
-    ap.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
-                    help="Cross-check verdict argmax vs PyTorch-CPU fp32 on 10 samples.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Smoke test: 2 samples, 1 warmup. Latency numbers not meaningful.")
     args = ap.parse_args()
 
     if args.dry_run:
-        args.n_samples, args.n_warmup, args.verify = 2, 1, False
+        args.n_samples, args.n_warmup = 2, 1
         if not args.lengths:
             args.lengths = [16]
         print("[bench-gen-cpu] DRY RUN — tiny params, latency numbers not meaningful.")
@@ -160,23 +149,11 @@ def main() -> int:
                            args.last_pos_logits)
     backend.load(args.model_id, args.artifact, max_seq_len)
 
-    # PyTorch-CPU fp32 reference, loaded once and reused across templates.
-    # last_pos_logits=True so the oracle runs the L2 path (matches the L2-baked
-    # backends literally; on fp32 it is value-preserving vs L1, so this is
-    # cosmetic on argmax but honest about what we compare against).
-    ref = None
-    if args.verify and args.runtime != "pytorch" and not args.unoptimized:
-        ref = PyTorchCPUBackend("fp32", verdict_token_ids, threads=None,
-                                last_pos_logits=True)
-        ref.load(args.model_id, None, max_seq_len)
-
     for tmpl in args.template:
         tmpl_pools = {L: sample_pools[(tmpl, L)] for L in cells}
         if args.kv_cache:
             prefix = common_prefix([s for pool in tmpl_pools.values() for s in pool])
             backend.prime_prefix(prefix)
-        if ref is not None:
-            verify_against_pytorch(ref, backend, tmpl_pools[cells[0]])
         for L in cells:
             run_cell(backend, tmpl_pools[L], args, L, tmpl)
     return 0

@@ -99,13 +99,37 @@ qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
 qg_section "7/9  build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
-qg_section "8/9  dump Rust benchmark inputs"
+qg_section "8/10 dump Rust benchmark inputs"
 qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
 
-qg_section "9/9  benchmarks"
+qg_section "9/10 verify verdict-logit equivalence vs PyTorch fp32"
+# One verify per (runtime, precision, artifact). Same weights -> same logits;
+# fp32 backends gated to atol=1e-2; fp16/quant gated argmax-only. Each call
+# is independent: a drift records FAIL and the next verify continues.
+verify() {
+    qg_step "verify $*" uv run python src/verify_lm_head.py "$@"
+    echo
+}
+verify --runtime pytorch  --precision fp32
+verify --runtime onnx     --precision fp32 --artifact "onnx_models/$BASENAME/fp32"
+verify --runtime onnx     --precision int8 --artifact "onnx_models/$BASENAME/int8"
+if uv run python -c "import onnxruntime_genai" 2>/dev/null; then
+    verify --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32"
+fi
+verify --runtime openvino --precision fp16 --artifact "ov_models/$BASENAME/fp16"
+verify --runtime openvino --precision int8 --artifact "ov_models/$BASENAME/int8"
+verify --runtime llamacpp --precision q8_0 --artifact "gguf_models/$BASENAME.q8_0.gguf"
+verify --runtime llamacpp --precision f16  --artifact "gguf_models/$BASENAME.f16.gguf"
+# rust-candle: rust binary dumps verdict logits, python verifier compares.
+qg_step "verify rust-candle dump" rust/target/release/qwen3guard-bench \
+    --input rust/bench_inputs.json --verify-out rust/verify_logits.json
+verify --runtime rust-candle --logits-json rust/verify_logits.json \
+    --rust-inputs rust/bench_inputs.json
+
+qg_section "10/10 benchmarks"
 gen() {
     qg_step "gen $*" uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
-        --n-samples "$N_SAMPLES" --threads "$THREADS" --verify \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
         "${DRY_GEN[@]}" "$@"
     echo
 }

@@ -4,8 +4,8 @@ __pycache__/
 .uv-cache/
 uv.lock.bak
 
-# benchmark outputs
-results/*.json
+# benchmark outputs (top-level + per-runtime subdirs + verify reference cache)
+results/
 
 # host-local run logs (Mac copies of Linux-box stdout, etc.)
 linux_box_log/
@@ -21,6 +21,7 @@ vendor/
 # Rust candle backend build output + generated benchmark inputs
 rust/target/
 rust/bench_inputs.json
+rust/verify_logits.json
 
 # HF cache lives in ~/.cache/huggingface by default; ignore any stray local copies
 hf_cache/

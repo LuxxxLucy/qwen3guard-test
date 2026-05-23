@@ -15,6 +15,7 @@ struct Args {
     input: PathBuf,
     out_dir: PathBuf,
     dry_run: bool,
+    verify_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +113,14 @@ struct LatencyStats {
 fn main() -> Result<()> {
     let args = parse_args()?;
     let dump = read_dump(&args.input)?;
+
+    let device = Device::Cpu;
+    let mut model = load_model(&dump.model_path, &device)?;
+
+    if let Some(out) = &args.verify_out {
+        return write_verify_dump(&mut model, &device, &dump, out);
+    }
+
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("failed to create {}", args.out_dir.display()))?;
 
@@ -121,9 +130,6 @@ fn main() -> Result<()> {
     } else {
         (dump.n_warmup, usize::MAX, dump.max_new_tokens)
     };
-
-    let device = Device::Cpu;
-    let mut model = load_model(&dump.model_path, &device)?;
 
     for (template_name, template) in &dump.templates {
         let l2_kv = run_l2(
@@ -168,6 +174,7 @@ fn parse_args() -> Result<Args> {
     let mut input = None;
     let mut out_dir = None;
     let mut dry_run = false;
+    let mut verify_out = None;
     let mut iter = env::args().skip(1);
 
     while let Some(arg) = iter.next() {
@@ -185,8 +192,17 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--dry-run" => dry_run = true,
+            "--verify-out" => {
+                verify_out = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--verify-out requires a path"))?,
+                ));
+            }
             "-h" | "--help" => {
-                println!("qwen3guard-bench --input <json> --out-dir <dir> [--dry-run]");
+                println!(
+                    "qwen3guard-bench --input <json> --out-dir <dir> [--dry-run]\n\
+                     qwen3guard-bench --input <json> --verify-out <path>"
+                );
                 std::process::exit(0);
             }
             _ => bail!("unknown argument: {arg}"),
@@ -195,8 +211,10 @@ fn parse_args() -> Result<Args> {
 
     Ok(Args {
         input: input.ok_or_else(|| anyhow!("missing --input <json>"))?,
-        out_dir: out_dir.ok_or_else(|| anyhow!("missing --out-dir <dir>"))?,
+        // --out-dir is only required for the benchmark path; verify uses --verify-out.
+        out_dir: out_dir.unwrap_or_else(|| PathBuf::from(".")),
         dry_run,
+        verify_out,
     })
 }
 
@@ -533,24 +551,66 @@ fn last_logits(logits: &Tensor) -> Result<Tensor> {
 }
 
 fn argmax_verdict(logits: &Tensor, verdict_token_ids: &[u32]) -> Result<usize> {
+    let values = read_verdict_logits(logits, verdict_token_ids)?;
+    let (best_idx, _) = values
+        .iter()
+        .enumerate()
+        .fold((0usize, f32::NEG_INFINITY), |(idx, best), (i, &v)| {
+            if v > best { (i, v) } else { (idx, best) }
+        });
+    Ok(best_idx)
+}
+
+fn read_verdict_logits(logits: &Tensor, verdict_token_ids: &[u32]) -> Result<Vec<f32>> {
     if verdict_token_ids.len() != 3 {
         bail!("expected exactly 3 verdict token ids")
     }
-    let mut best_idx = 0usize;
-    let mut best_value = f32::NEG_INFINITY;
+    verdict_token_ids
+        .iter()
+        .map(|&token_id| {
+            logits
+                .i(token_id as usize)
+                .with_context(|| format!("verdict token id {token_id} outside logits vocab"))?
+                .to_scalar::<f32>()
+                .map_err(Into::into)
+        })
+        .collect()
+}
 
-    for (idx, &token_id) in verdict_token_ids.iter().enumerate() {
-        let value = logits
-            .i(token_id as usize)
-            .with_context(|| format!("verdict token id {token_id} outside logits vocab"))?
-            .to_scalar::<f32>()?;
-        if value > best_value {
-            best_idx = idx;
-            best_value = value;
+/// Dump verdict logits for the first 10 forced inputs per template. The
+/// Python-side verify_lm_head.py compares them against a cached PyTorch fp32
+/// reference. Single L1 no-kv forward over the full forced_ids per sample —
+/// the kv-cached and chunked paths inherit correctness from this baseline.
+fn write_verify_dump(
+    model: &mut ModelForCausalLM,
+    device: &Device,
+    dump: &BenchDump,
+    out: &Path,
+) -> Result<()> {
+    const VERIFY_N: usize = 10;
+    let mut all: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
+    for (template_name, template) in &dump.templates {
+        ensure_template_l2(template_name, template)?;
+        let n = VERIFY_N.min(template.forced.len());
+        let mut rows = Vec::with_capacity(n);
+        for i in 0..n {
+            model.clear_kv_cache();
+            let input = input_tensor(&template.forced[i], device)?;
+            let logits = model.forward(&input, 0)?;
+            let last = last_logits(&logits)?;
+            rows.push(read_verdict_logits(&last, &template.verdict_token_ids)?);
         }
+        println!("[verify-dump] {template_name}: {n} samples");
+        all.insert(template_name.clone(), rows);
     }
-
-    Ok(best_idx)
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, serde_json::to_string_pretty(&all)?)
+        .with_context(|| format!("failed to write {}", out.display()))?;
+    println!("[verify-dump] wrote {}", out.display());
+    Ok(())
 }
 
 fn argmax_full(logits: &Tensor) -> Result<usize> {
