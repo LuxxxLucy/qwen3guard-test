@@ -90,11 +90,9 @@ struct BenchResult {
 struct Extra {
     mode: &'static str,
     opt_level: String,
-    runtime: &'static str,
     precision: &'static str,
     template: String,
     kv_cache: bool,
-    threads: Option<usize>,
     suffix_path: Option<String>,
 }
 
@@ -117,8 +115,6 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("failed to create {}", args.out_dir.display()))?;
 
-    // --dry-run is a real but tiny run — it still loads the model and runs the
-    // candle forward, so the whole path is smoke-tested; only the counts shrink.
     let (n_warmup, sample_cap, max_new_tokens) = if args.dry_run {
         println!("dry-run: 2 samples, 1 warmup, max_new_tokens=4");
         (1usize, 2usize, 4usize)
@@ -130,9 +126,6 @@ fn main() -> Result<()> {
     let mut model = load_model(&dump.model_path, &device)?;
 
     for (template_name, template) in &dump.templates {
-        // L2 +kv: prime the shared system-prompt prefix once, clone the primed
-        // state per sample, feed only the suffix. Same prefix-KV trick the
-        // ONNX +kv and llama.cpp +kv cells use.
         let l2_kv = run_l2(
             &mut model,
             &device,
@@ -144,8 +137,6 @@ fn main() -> Result<()> {
         )?;
         write_result(&args.out_dir, l2_kv)?;
 
-        // L2 (no-kv): feed the full forced sequence per sample, no priming.
-        // The matched baseline for the +kv comparison.
         let l2_nokv = run_l2_no_kv(
             &mut model,
             &device,
@@ -593,11 +584,9 @@ fn make_result(
         extra: Extra {
             mode: "representative",
             opt_level: opt_level.as_str().to_string(),
-            runtime: "rust-candle",
             precision: "fp32",
             template: template.to_string(),
             kv_cache,
-            threads: None,
             suffix_path: suffix_path.map(|path| path.as_str().to_string()),
         },
         timestamp_utc: timestamp(),
