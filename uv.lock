@@ -1210,26 +1210,18 @@ name = "onnxruntime-genai"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "onnxruntime" },
+    { name = "numpy", marker = "platform_machine != 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "onnxruntime", marker = "platform_machine != 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/09/04/0510bc9e8e1c52e7e9e8d8aebcb18373895fd0ea09e306e8380de55ecbbe/onnxruntime_genai-0.13.1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:2b61a767d90e58683a29503df1dae3cb8608ca7eff8e1bbb23fed9f6552fd794", size = 3693332, upload-time = "2026-04-07T21:27:39.263Z" },
     { url = "https://files.pythonhosted.org/packages/3f/f0/9bb9ff955191bf1ff5da2a85d5a9f3d8c62c922998db3c3da25282e732de/onnxruntime_genai-0.13.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:6c8fcaadbb265791e6c7e309327552b5f8749dadf764ea148d41b5f1170386ca", size = 54528110, upload-time = "2026-04-07T21:27:42.53Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/87/cf2dbfee0aa6a3012fc2ddd990bc944ef1ecae9e15a890c2934418dea635/onnxruntime_genai-0.13.1-cp311-cp311-win_amd64.whl", hash = "sha256:b96f82f0f61862680171b040b941a2a49d8a0cb843a07ab07983aa4e7d755b8c", size = 2650974, upload-time = "2026-04-07T21:27:46.489Z" },
-    { url = "https://files.pythonhosted.org/packages/27/2f/51b619841517688fec0690406d43af950ad585cdec4e795e0262c751bf6d/onnxruntime_genai-0.13.1-cp311-cp311-win_arm64.whl", hash = "sha256:55fe0ae4786fbc13b269b1c85b5326992e3f5cf945a464f59a30ebe09584019c", size = 2568892, upload-time = "2026-04-07T21:27:47.853Z" },
     { url = "https://files.pythonhosted.org/packages/6c/20/cfb80c54d90e1cdd37e44365684b6ff65da8ddb46fd64fa4f74c4a8fcbec/onnxruntime_genai-0.13.1-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:c3e6d4e95b16a2014d409ad8e6c52773ec28d99ec7a473ab5d47a6fe0b4287ca", size = 3693770, upload-time = "2026-04-07T21:27:49.541Z" },
     { url = "https://files.pythonhosted.org/packages/91/30/51356b0590b13ce9158ec9564d56eb0acb24ee7cc0b5e31e0a4c04b55306/onnxruntime_genai-0.13.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:fc32dd12a1e5cccf8de91b9cbae20331ea2bc382f31217801ba30bc82234bb81", size = 54514653, upload-time = "2026-04-07T21:27:52.535Z" },
-    { url = "https://files.pythonhosted.org/packages/3a/31/e272114034038994014de653654c009a6087e7026b09c8fbe66af86d7f1c/onnxruntime_genai-0.13.1-cp312-cp312-win_amd64.whl", hash = "sha256:f06f4073de46603106bb562f7e80a9f048e14fd28d2000b782040acf6f9c0684", size = 2651874, upload-time = "2026-04-07T21:27:55.137Z" },
-    { url = "https://files.pythonhosted.org/packages/99/52/d7e8a13cd5e215963f650674f4631c563f0dd8c94a51b1b05cf52a56e17b/onnxruntime_genai-0.13.1-cp312-cp312-win_arm64.whl", hash = "sha256:500f49567492b6175d0e81193b2fa232c4f8032ee32aa717dba5fb9cb5814b62", size = 2568994, upload-time = "2026-04-07T21:27:56.816Z" },
     { url = "https://files.pythonhosted.org/packages/63/07/cfa5f7ec9657b37b73c0910f6c5e9b3780d761ba82baa0f83a68dd844f3b/onnxruntime_genai-0.13.1-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:850b7e48a04513c08931c59c6d09cd3f88576a418fa1a43257d75924f9e36ae6", size = 3693855, upload-time = "2026-04-07T21:27:58.263Z" },
     { url = "https://files.pythonhosted.org/packages/e3/2d/967b1f6d991784fbc36ced1a296156e8789c7e8a16490b7817a4f9e8e7b9/onnxruntime_genai-0.13.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:6cfe0e191cfcf3385b5c32f81aee9cb090dfd1474473a1ce5bec0487a5f55563", size = 54514969, upload-time = "2026-04-07T21:28:01.285Z" },
-    { url = "https://files.pythonhosted.org/packages/96/64/8547046d61c2f5d6c589b0be8e9178c31d149cb9c9e3af543227b583ba6e/onnxruntime_genai-0.13.1-cp313-cp313-win_amd64.whl", hash = "sha256:910ef7359f646553ef78d6d0069d99d9e2f3ee07cd971305e935109b7399189c", size = 2651935, upload-time = "2026-04-07T21:28:04.295Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/f6/9f7002f56caabd71df7349c72abf5e4851fd6ede99d1e4a79a2a0d6aa84d/onnxruntime_genai-0.13.1-cp313-cp313-win_arm64.whl", hash = "sha256:7b696050beb496e3cc7eb32114a8b709003f27e83d3f1cdc2aafb4bc026ea536", size = 2568987, upload-time = "2026-04-07T21:28:06.241Z" },
     { url = "https://files.pythonhosted.org/packages/22/91/85d46e016946565e8ae1c9295e70872d9aadb8256cd25ac8350694a57a35/onnxruntime_genai-0.13.1-cp314-cp314-macosx_12_0_arm64.whl", hash = "sha256:0ea257ec6bd919041054ad8444765742344975eaadcfa013646e32246ce3c448", size = 3694502, upload-time = "2026-04-07T21:28:07.864Z" },
     { url = "https://files.pythonhosted.org/packages/fb/bb/c62f78b40f1ca2c7001d01ae752b2652d16c25d0e9071f2667e8678cf7db/onnxruntime_genai-0.13.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:8e541e2f82c868da0c825bc4de99d8bc4fbcea13a1222d7dd2e98ab9467e81b9", size = 54508049, upload-time = "2026-04-07T21:28:10.814Z" },
-    { url = "https://files.pythonhosted.org/packages/57/e8/994d9bed439d62114f459e5288972c02adac7b69d01ad8cbf43ccb7a7005/onnxruntime_genai-0.13.1-cp314-cp314-win_amd64.whl", hash = "sha256:d4006903d13cf231df2c5b97f17f992c22b39579a742a3644269cf521c44d642", size = 2760995, upload-time = "2026-04-07T21:28:13.422Z" },
-    { url = "https://files.pythonhosted.org/packages/77/d5/bc76e0c4720707530e57cf91dff6768bfaccbe3985bad84b3818fd9084ae/onnxruntime_genai-0.13.1-cp314-cp314-win_arm64.whl", hash = "sha256:cec1ade266d38f1cc1191c2c5cd80ee3473f14a8e6284d9fde78505527735609", size = 2688329, upload-time = "2026-04-07T21:28:15.325Z" },
 ]
 
 [[package]]
@@ -1796,7 +1788,7 @@ dependencies = [
     { name = "onnx" },
     { name = "onnx-ir" },
     { name = "onnxruntime" },
-    { name = "onnxruntime-genai" },
+    { name = "onnxruntime-genai", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "optimum" },
     { name = "optimum-intel", extra = ["openvino"] },
     { name = "optimum-onnx" },
@@ -1815,7 +1807,7 @@ requires-dist = [
     { name = "onnx", specifier = ">=1.16" },
     { name = "onnx-ir", specifier = ">=0.1" },
     { name = "onnxruntime", specifier = ">=1.18" },
-    { name = "onnxruntime-genai", specifier = ">=0.13.1" },
+    { name = "onnxruntime-genai", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')", specifier = ">=0.13.1" },
     { name = "optimum", specifier = ">=1.22" },
     { name = "optimum-intel", extras = ["openvino"], specifier = ">=1.21" },
     { name = "optimum-onnx", specifier = ">=0.1" },
