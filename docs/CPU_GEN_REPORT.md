@@ -19,8 +19,8 @@
 |                  | +L3 prefix-KV       | 1509.2 / 2658.8 | 771.8 / 1312.6  |
 | llamacpp f16     | L1 (L2 baked)       | 711.7 / 926.1   | 401.7 / 592.6   |
 |                  | +L3 prefix-KV       | 522.2 / 687.1   | 297.8 / 390.2   |
-| rust-candle fp32 | L0 (L2 baked)       | 1505.1 / 1505.1 | 958.1 / 958.1   |
-|                  | +L1 (L2 baked)      | 2068.6 / 2415.7 | 1307.9 / 2251.3 |
+| rust-candle fp32 | L0                  | 1505.1 / 1505.1 | 958.1 / 958.1   |
+|                  | +L1 forced-prefix   | 2068.6 / 2415.7 | 1307.9 / 2251.3 |
 |                  | +L3 prefix-KV       | 1140.4 / 1376.8 | 847.2 / 975.7   |
 | vllm cpu fp16    | default (all baked) | -               | -               |
 
@@ -36,7 +36,7 @@ The rows are a strictly-cumulative optimization ladder. Each `+Lk` row layers on
 
 - **L1** — `+forced-prefix`. Teacher-force `"Safety: "` and read the 3 verdict logits from one forward pass. No decode loop.
 
-- **L2** — `+lastpos lm_head only`. Slice hidden state to last position before the vocab projection: `[B, S, H] → [B, 1, H]` then `@ [H, V]`. Skips the ~200 prompt-position vocab projections. Same trick as ChatGPT's "lm_head trim" and ORT GenAI's `prune_lm_head=true`. PyTorch exposes this via `logits_to_keep=1`. ONNX, OpenVINO, llama.cpp, and Rust candle bake it into export or default — those backends show no separate L2 row.
+- **L2** — `+lastpos lm_head only`. Slice hidden state to last position before the vocab projection: `[B, S, H] → [B, 1, H]` then `@ [H, V]`. Skips the ~200 prompt-position vocab projections. Same trick as ChatGPT's "lm_head trim" and ORT GenAI's `prune_lm_head=true`. PyTorch exposes this via `logits_to_keep=1`. ONNX, OpenVINO, and llama.cpp bake it into export or default — those backends show no separate L2 row. Rust candle does not bake it (its `ModelForCausalLM.forward` projects the full sequence; the last-position slice happens after the matmul), so the rust-candle L0 / L1 rows are unannotated.
 
 - **L3** — `+shared system-prompt KV cache`. Precompute the shared prefix KV once and reuse it across calls. Per-call cost shrinks to the variable-suffix forward. ONNX uses the with-past graph + IO binding; llama.cpp rewinds its context in place; Rust candle clones the primed model. PyTorch and OpenVINO don't have this mode in the bench.
 

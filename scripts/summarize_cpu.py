@@ -1,9 +1,7 @@
 """Print the Qwen3Guard-Gen CPU benchmark table from result JSONs.
 
-Scans results/ for the files written by the Gen benchmark cells and prints a
-method x template latency pivot to stdout. Also writes CPU_GEN_REPORT.md so the
-whole benchmark is readable from a single stdout stream and a single file.
-Run at the end of scripts/run_gen_cpu.sh.
+Scans results/, prints a method x template latency pivot to stdout, and
+writes docs/CPU_GEN_REPORT.md. Run at the end of scripts/run_gen_cpu.sh.
 """
 from __future__ import annotations
 
@@ -165,7 +163,7 @@ def main() -> int:
     print_table(table)
     print()
 
-    report = Path("CPU_GEN_REPORT.md")
+    report = Path("docs/CPU_GEN_REPORT.md")
     write_report(table, report)
     print(f"[summarize] wrote {report}")
     return 0
