@@ -577,10 +577,19 @@ fn read_verdict_logits(logits: &Tensor, verdict_token_ids: &[u32]) -> Result<Vec
         .collect()
 }
 
-/// Dump verdict logits for the first 10 forced inputs per template. The
-/// Python-side verify_lm_head.py compares them against a cached PyTorch fp32
-/// reference. Single L1 no-kv forward over the full forced_ids per sample —
-/// the kv-cached and chunked paths inherit correctness from this baseline.
+#[derive(Debug, Serialize)]
+struct VerifyDumpEntry {
+    #[serde(rename = "L0")]
+    l0: Vec<i32>,
+    #[serde(rename = "L1")]
+    l1: Vec<Vec<f32>>,
+    #[serde(rename = "L3")]
+    l3: Vec<Vec<f32>>,
+}
+
+/// Dump verdict outputs at L0, L1, and L3 for the first 10 inputs per
+/// template. Python-side verify_lm_head.py reads this and compares each row
+/// against the PyTorch fp32 L0 reference (argmax) and L1 reference (logits).
 fn write_verify_dump(
     model: &mut ModelForCausalLM,
     device: &Device,
@@ -588,20 +597,52 @@ fn write_verify_dump(
     out: &Path,
 ) -> Result<()> {
     const VERIFY_N: usize = 10;
-    let mut all: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
+    let mut all: BTreeMap<String, VerifyDumpEntry> = BTreeMap::new();
     for (template_name, template) in &dump.templates {
         ensure_template_l2(template_name, template)?;
-        let n = VERIFY_N.min(template.forced.len());
-        let mut rows = Vec::with_capacity(n);
-        for i in 0..n {
+        ensure_template_l0(template_name, template)?;
+        let n_forced = VERIFY_N.min(template.forced.len());
+        let n_plain = VERIFY_N.min(template.plain.len());
+
+        // L1: single no-kv forward over full forced_ids.
+        let mut l1 = Vec::with_capacity(n_forced);
+        for i in 0..n_forced {
             model.clear_kv_cache();
             let input = input_tensor(&template.forced[i], device)?;
             let logits = model.forward(&input, 0)?;
-            let last = last_logits(&logits)?;
-            rows.push(read_verdict_logits(&last, &template.verdict_token_ids)?);
+            l1.push(read_verdict_logits(&last_logits(&logits)?,
+                                        &template.verdict_token_ids)?);
         }
-        println!("[verify-dump] {template_name}: {n} samples");
-        all.insert(template_name.clone(), rows);
+
+        // L3: prime the shared prefix once, run each sample's suffix on a
+        // cloned primed model (matches run_l2's per-sample reset).
+        model.clear_kv_cache();
+        let prefix = input_tensor(&template.prefix, device)?;
+        model.forward(&prefix, 0)?;
+        let primed = model.clone();
+        let prefix_len = template.prefix.len();
+        let mut l3 = Vec::with_capacity(n_forced);
+        for i in 0..n_forced {
+            let suffix = &template.forced[i][prefix_len..];
+            let mut sample_model = primed.clone();
+            let input = input_tensor(suffix, device)?;
+            let logits = sample_model.forward(&input, prefix_len)?;
+            l3.push(read_verdict_logits(&last_logits(&logits)?,
+                                        &template.verdict_token_ids)?);
+        }
+
+        // L0: decode loop on plain ids. Track generated tokens; return first
+        // verdict-token's index (or -1).
+        let max_new_tokens = dump.max_new_tokens;
+        let mut l0 = Vec::with_capacity(n_plain);
+        for i in 0..n_plain {
+            l0.push(decode_l0_verdict(model, device, &template.plain[i],
+                                      max_new_tokens,
+                                      &template.verdict_token_ids)?);
+        }
+
+        println!("[verify-dump] {template_name}: L0={n_plain} L1={n_forced} L3={n_forced}");
+        all.insert(template_name.clone(), VerifyDumpEntry { l0, l1, l3 });
     }
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)
@@ -611,6 +652,35 @@ fn write_verify_dump(
         .with_context(|| format!("failed to write {}", out.display()))?;
     println!("[verify-dump] wrote {}", out.display());
     Ok(())
+}
+
+/// L0 greedy-decode loop matching `run_l0_sample`, but tracks generated
+/// tokens and returns the first verdict-token's index (0/1/2) or -1.
+fn decode_l0_verdict(
+    model: &mut ModelForCausalLM,
+    device: &Device,
+    prompt: &[u32],
+    max_new_tokens: usize,
+    verdict_token_ids: &[u32],
+) -> Result<i32> {
+    model.clear_kv_cache();
+    let input = input_tensor(prompt, device)?;
+    let logits = model.forward(&input, 0)?;
+    let mut next = argmax_full(&last_logits(&logits)?)? as u32;
+    let mut offset = prompt.len();
+    for _ in 1..max_new_tokens {
+        if let Some(idx) = verdict_token_ids.iter().position(|&t| t == next) {
+            return Ok(idx as i32);
+        }
+        let input = input_tensor(&[next], device)?;
+        let logits = model.forward(&input, offset)?;
+        next = argmax_full(&last_logits(&logits)?)? as u32;
+        offset += 1;
+    }
+    if let Some(idx) = verdict_token_ids.iter().position(|&t| t == next) {
+        return Ok(idx as i32);
+    }
+    Ok(-1)
 }
 
 fn argmax_full(logits: &Tensor) -> Result<usize> {

@@ -46,12 +46,24 @@ class GenBackend(ABC):
 
     def predict(self, forced_ids: list[int]) -> int:
         """Returns the verdict index (0=Safe, 1=Unsafe, 2=Controversial). In L0
-        unoptimized mode runs the decode loop instead and returns 0 — L0 skips
-        the verify check. bench_common.warmup_and_measure ignores the return."""
+        unoptimized mode runs the decode loop; the implementation must return
+        the index of the first verdict-token produced (or -1 if the model
+        emitted no verdict in 32 tokens). bench_common.warmup_and_measure
+        ignores the return; the verify gate consumes it."""
         if self.unoptimized:
             return self.decode_l0(forced_ids)
         lg = self.verdict_logits(forced_ids)
         return lg.index(max(lg))
+
+    def _verdict_from_generated(self, token_ids) -> int:
+        """First verdict-token in a generated sequence -> its verdict index,
+        else -1. Used by every backend's decode_l0 to convert the decode
+        loop's output stream into a single classifier label."""
+        vmap = {t: i for i, t in enumerate(self.verdict_token_ids)}
+        for t in token_ids:
+            if int(t) in vmap:
+                return vmap[int(t)]
+        return -1
 
 
 class PyTorchCPUBackend(GenBackend):
@@ -85,12 +97,12 @@ class PyTorchCPUBackend(GenBackend):
         torch = self._torch
         t = torch.tensor([plain_ids], dtype=torch.long)
         with torch.no_grad():
-            self.model.generate(
+            out = self.model.generate(
                 input_ids=t, attention_mask=torch.ones_like(t),
                 max_new_tokens=L0_MAX_NEW_TOKENS, do_sample=False, num_beams=1,
                 use_cache=True,
             )
-        return 0
+        return self._verdict_from_generated(out[0, len(plain_ids):].tolist())
 
 
 class OnnxCPUBackend(GenBackend):
@@ -196,8 +208,10 @@ class OnnxCPUBackend(GenBackend):
             [self.output_name, *self._present_names], feeds,
         )
         logits, past_kv = outputs[0], outputs[1:]
+        generated = []
         for step in range(L0_MAX_NEW_TOKENS - 1):
             next_token = int(logits[0, -1].argmax())
+            generated.append(next_token)
             new_pos = p + step
             feeds = {
                 "input_ids": np.array([[next_token]], np.int64),
@@ -210,7 +224,7 @@ class OnnxCPUBackend(GenBackend):
                 [self.output_name, *self._present_names], feeds,
             )
             logits, past_kv = outputs[0], outputs[1:]
-        return 0
+        return self._verdict_from_generated(generated)
 
 
 class OnnxGenAICPUBackend(GenBackend):
@@ -246,11 +260,15 @@ class OnnxGenAICPUBackend(GenBackend):
     def decode_l0(self, plain_ids: list[int]) -> int:
         self._gen.rewind_to(0)
         self._gen.append_tokens(plain_ids)
+        generated: list[int] = []
         for _ in range(L0_MAX_NEW_TOKENS - 1):
             if self._gen.is_done():
                 break
             self._gen.generate_next_token()
-        return 0
+            # get_next_tokens returns the most-recently sampled token per beam.
+            tok = self._gen.get_next_tokens()
+            generated.append(int(self._np.asarray(tok).reshape(-1)[0]))
+        return self._verdict_from_generated(generated)
 
 
 class OpenVINOCPUBackend(GenBackend):
@@ -282,11 +300,11 @@ class OpenVINOCPUBackend(GenBackend):
     def decode_l0(self, plain_ids: list[int]) -> int:
         torch = self._torch
         t = torch.tensor([plain_ids], dtype=torch.long)
-        self.model.generate(
+        out = self.model.generate(
             input_ids=t, attention_mask=torch.ones_like(t),
             max_new_tokens=L0_MAX_NEW_TOKENS, do_sample=False, num_beams=1,
         )
-        return 0
+        return self._verdict_from_generated(out[0, len(plain_ids):].tolist())
 
 
 class VLLMCPUBackend(GenBackend):
@@ -368,13 +386,16 @@ class LlamaCppBackend(GenBackend):
         self.llm.reset()
         self.llm.eval(plain_ids)
         n_vocab = self.llm.n_vocab()
+        generated: list[int] = []
         # eval(plain_ids) is the prefill (counts as 1 forward); decode the
         # remaining L0_MAX_NEW_TOKENS-1 so the total matches the other backends.
         for _ in range(L0_MAX_NEW_TOKENS - 1):
             row = self._get_logits(self._ctx, -1)
             logits = np.ctypeslib.as_array(row, shape=(n_vocab,))
-            self.llm.eval([int(logits.argmax())])
-        return 0
+            tok = int(logits.argmax())
+            generated.append(tok)
+            self.llm.eval([tok])
+        return self._verdict_from_generated(generated)
 
 
 _BACKENDS: dict[Runtime, type[GenBackend]] = dict(zip(

@@ -44,7 +44,7 @@ THREADS="$(qg_detect_threads)"
 echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  model=$MODEL_ID"
 [[ -n "$DRY_RUN" ]] && echo "[run_gen_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
 
-qg_section "1/9  uv sync (llama-cpp-python built from source)"
+qg_section "1/10 uv sync (llama-cpp-python built from source)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
 # pyproject makes the build native. uv keys its build cache by source-dist
@@ -70,14 +70,14 @@ uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
 qg_step "uv sync" true
 
-qg_section "2/9  download weights + Qwen3GuardTest dataset"
+qg_section "2/10 download weights + Qwen3GuardTest dataset"
 qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
 
-qg_section "3/9  export ONNX (fp32, int8, with-past)"
+qg_section "3/10 export ONNX (fp32, int8, with-past)"
 qg_step "export onnx" uv run python scripts/export_gen_onnx.py \
     --model-id "$MODEL_ID" --precisions fp32 int8 --with-past
 
-qg_section "4/9  export ONNX Runtime GenAI (fp32, prune_lm_head)"
+qg_section "4/10 export ONNX Runtime GenAI (fp32, prune_lm_head)"
 # onnxruntime-genai has no Linux aarch64 wheel (Mac arm64, Linux x86_64, and
 # Windows only). The dep is platform-gated in pyproject.toml; both the export
 # and bench cells gate on `import onnxruntime_genai` and skip cleanly.
@@ -88,43 +88,25 @@ else
     echo "[skip] onnxruntime-genai not importable on this host (no Linux aarch64 wheel)."
 fi
 
-qg_section "5/9  export OpenVINO (fp16, int8)"
+qg_section "5/10 export OpenVINO (fp16, int8)"
 qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp16 int8
 
-qg_section "6/9  export GGUF (f16, q8_0)"
+qg_section "6/10 export GGUF (f16, q8_0)"
 qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
     --model-id "$MODEL_ID" --quants f16 q8_0
 
-qg_section "7/9  build Rust candle backend"
+qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
 qg_section "8/10 dump Rust benchmark inputs"
 qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
 
-qg_section "9/10 verify verdict-logit equivalence vs PyTorch fp32"
-# One verify per (runtime, precision, artifact). Same weights -> same logits;
-# fp32 backends gated to atol=1e-2; fp16/quant gated argmax-only. Each call
-# is independent: a drift records FAIL and the next verify continues.
-verify() {
-    qg_step "verify $*" uv run python src/verify_lm_head.py "$@"
-    echo
-}
-verify --runtime pytorch  --precision fp32
-verify --runtime onnx     --precision fp32 --artifact "onnx_models/$BASENAME/fp32"
-verify --runtime onnx     --precision int8 --artifact "onnx_models/$BASENAME/int8"
-if uv run python -c "import onnxruntime_genai" 2>/dev/null; then
-    verify --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32"
-fi
-verify --runtime openvino --precision fp16 --artifact "ov_models/$BASENAME/fp16"
-verify --runtime openvino --precision int8 --artifact "ov_models/$BASENAME/int8"
-verify --runtime llamacpp --precision q8_0 --artifact "gguf_models/$BASENAME.q8_0.gguf"
-verify --runtime llamacpp --precision f16  --artifact "gguf_models/$BASENAME.f16.gguf"
-# rust-candle: rust binary dumps verdict logits, python verifier compares.
-qg_step "verify rust-candle dump" rust/target/release/qwen3guard-bench \
-    --input rust/bench_inputs.json --verify-out rust/verify_logits.json
-verify --runtime rust-candle --logits-json rust/verify_logits.json \
-    --rust-inputs rust/bench_inputs.json
+qg_section "9/10 cross-impl trick-correctness gate"
+# Per-row verify against PyTorch fp32 L0 reference. Standalone runnable via
+# `bash scripts/verify_correctness.sh`. Drift on any row records FAIL; the
+# bench section continues regardless so latency cells still populate.
+qg_step "verify (all rows)" bash scripts/verify_correctness.sh
 
 qg_section "10/10 benchmarks"
 gen() {

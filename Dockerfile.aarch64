@@ -42,10 +42,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Fresh clone. REPO_REF defaults to main; override with --build-arg REPO_REF=<sha>
-# to pin a specific commit (useful when re-running an old configuration).
+# to pin a specific commit (busts the docker layer cache too, since the value
+# of REPO_REF is interpolated into the RUN command).
 ARG REPO_URL=https://github.com/LuxxxLucy/qwen3guard-test.git
 ARG REPO_REF=main
-RUN git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /work
+RUN git clone "${REPO_URL}" /work && git -C /work checkout "${REPO_REF}"
 WORKDIR /work
 
 # Default to dry-run: tiny warmup/iteration counts, every runtime still
