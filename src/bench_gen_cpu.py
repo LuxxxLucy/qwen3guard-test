@@ -161,9 +161,13 @@ def main() -> int:
     backend.load(args.model_id, args.artifact, max_seq_len)
 
     # PyTorch-CPU fp32 reference, loaded once and reused across templates.
+    # last_pos_logits=True so the oracle runs the L2 path (matches the L2-baked
+    # backends literally; on fp32 it is value-preserving vs L1, so this is
+    # cosmetic on argmax but honest about what we compare against).
     ref = None
     if args.verify and args.runtime != "pytorch" and not args.unoptimized:
-        ref = PyTorchCPUBackend("fp32", verdict_token_ids, threads=None)
+        ref = PyTorchCPUBackend("fp32", verdict_token_ids, threads=None,
+                                last_pos_logits=True)
         ref.load(args.model_id, None, max_seq_len)
 
     for tmpl in args.template:

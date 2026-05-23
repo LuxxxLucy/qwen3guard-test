@@ -128,5 +128,5 @@ Cells are `p50 / p99` ms when populated.
 ## Deferred (post-Mac, possibly post-Kunpeng)
 
 - **Manual `torch.onnx.export` with `LastLogitsWrapper`.** A third ONNX export path alongside Optimum and ORT GenAI. Worth doing if Phase 1 finds Optimum is not pruning and we want a clean A/B against `prune_lm_head`.
-- **llama.cpp L0 off-by-one.** Currently does 33 forwards (1 prefill + 32 decode) vs 32 elsewhere.
+- **Rust candle L2 baking.** `ModelForCausalLM.forward` in `candle-transformers` projects the full sequence; the last-position slice happens after the matmul. Faithful L2 baking would need a custom forward that slices before lm_head. Workaround: the report Legend now labels rust-candle's L0/L1 rows without the "(L2 baked)" annotation.
 - **PyTorch and OpenVINO L3 (prefix-KV).** Out of scope for now; the existing backends with L3 are enough to characterize the trick.

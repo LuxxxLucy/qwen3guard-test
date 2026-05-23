@@ -368,7 +368,9 @@ class LlamaCppBackend(GenBackend):
         self.llm.reset()
         self.llm.eval(plain_ids)
         n_vocab = self.llm.n_vocab()
-        for _ in range(L0_MAX_NEW_TOKENS):
+        # eval(plain_ids) is the prefill (counts as 1 forward); decode the
+        # remaining L0_MAX_NEW_TOKENS-1 so the total matches the other backends.
+        for _ in range(L0_MAX_NEW_TOKENS - 1):
             row = self._get_logits(self._ctx, -1)
             logits = np.ctypeslib.as_array(row, shape=(n_vocab,))
             self.llm.eval([int(logits.argmax())])
