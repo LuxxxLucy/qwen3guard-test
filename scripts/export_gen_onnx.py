@@ -23,12 +23,16 @@ _INT64_MAX = 2**63 - 1
 def slice_lm_head_last_pos(model_path: Path) -> None:
     """Splice a Slice (axis=1, start=-1, end=INT64_MAX, step=1) onto the
     lm_head MatMul's hidden-states input so the MatMul runs over `[B, 1, H]`
-    and `logits` becomes `[B, 1, V]`. Edits model.onnx in place. Idempotent."""
+    and `logits` becomes `[B, 1, V]`. Edits model.onnx in place. Idempotent.
+
+    Loads with load_external_data=False so the multi-GB weight blob never
+    touches RAM (matters on resource-constrained aarch64 builders); saves the
+    graph alone, leaving the external data file in place untouched."""
     import onnx
     from onnx import helper, numpy_helper
     import numpy as np
 
-    model = onnx.load(str(model_path))
+    model = onnx.load(str(model_path), load_external_data=False)
     graph = model.graph
 
     init_names = {i.name for i in graph.initializer}
@@ -76,10 +80,7 @@ def slice_lm_head_last_pos(model_path: Path) -> None:
         idx = list(graph.node).index(hidden_producer)
         graph.node.insert(idx + 1, slice_node)
 
-    use_ext = (model_path.with_suffix(".onnx_data")).exists()
-    onnx.save(model, str(model_path), save_as_external_data=use_ext,
-              all_tensors_to_one_file=True,
-              location=model_path.name + "_data" if use_ext else None)
+    onnx.save(model, str(model_path))
     print(f"[export-onnx] slice-lm-head: {model_path}")
 
 
@@ -90,12 +91,9 @@ def export_fp32(model_id: str, out: Path, opset: int) -> None:
     out.mkdir(parents=True, exist_ok=True)
     from optimum.exporters.onnx import main_export
     print(f"[export-onnx] fp32: {model_id} -> {out}")
-    # no_post_process=True skips tied-weight dedup, which can hit the 2GB
-    # protobuf limit even for small models.
     main_export(
         model_name_or_path=model_id, output=str(out),
-        task="text-generation", opset=opset,
-        trust_remote_code=True, no_post_process=True,
+        task="text-generation", opset=opset, trust_remote_code=True,
     )
     slice_lm_head_last_pos(out / "model.onnx")
 
@@ -125,8 +123,7 @@ def export_withpast(model_id: str, base: Path, opset: int) -> None:
     print(f"[export-onnx] with-past: {model_id} -> {out}")
     main_export(
         model_name_or_path=model_id, output=str(out),
-        task="text-generation-with-past", opset=opset,
-        trust_remote_code=True, no_post_process=True,
+        task="text-generation-with-past", opset=opset, trust_remote_code=True,
     )
     slice_lm_head_last_pos(out / "model.onnx")
 

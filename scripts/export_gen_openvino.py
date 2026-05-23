@@ -79,8 +79,14 @@ def export_one(model_id: str, out: Path, precision: str) -> None:
         raise SystemExit(f"unknown precision {precision!r}")
 
     print(f"[export-ov] {precision}: {model_id} -> {out}")
+    # compile=False: skip OV's JIT compile after export. optimum-intel's
+    # __init__ otherwise runs compile_model on every from_pretrained, which
+    # fails on aarch64 oneDNN ("could not create a primitive descriptor for
+    # the matmul primitive"). The IR is saved before compile would run; the
+    # bench loads it fresh later (where compile_model with proper inputs works).
     model = OVModelForCausalLM.from_pretrained(
-        model_id, export=True, trust_remote_code=True, quantization_config=qcfg,
+        model_id, export=True, compile=False,
+        trust_remote_code=True, quantization_config=qcfg,
     )
     model.save_pretrained(str(out))
     slice_lm_head_last_position(out / "openvino_model.xml")
