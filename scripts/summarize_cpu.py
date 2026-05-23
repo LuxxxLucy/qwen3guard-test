@@ -11,42 +11,35 @@ import json
 import sys
 from pathlib import Path
 
-from contract import DEFAULT_PRECISION, OPT_LEVELS, RUNTIMES, TEMPLATES, ResultExtra
-
-RT_PYTORCH, RT_ONNX, RT_ONNX_GENAI, RT_OPENVINO, RT_LLAMACPP, RT_VLLM = RUNTIMES
+from contract import OPT_LEVELS, RUNTIMES, TEMPLATES
 
 # (runtime, precision, opt_level) -> (backend_label, variant_label).
-# Order = table order. Backend label only appears on the first row of each
-# backend block; subsequent rows leave it blank. Variant labels read as the
-# cumulative trick stack, with "(L2 baked)" annotation on backends that bake
-# lastpos into the export. See LEGEND for what each level means.
+# Backend label appears only on the first row of each backend block.
+# "(L2 baked)" annotates backends that bake lastpos into export.
 ROWS: list[tuple[tuple[str, str, str], tuple[str, str]]] = [
-    ((RT_PYTORCH,    "fp32", "L0"), ("pytorch fp32",      "L0")),
-    ((RT_PYTORCH,    "fp32", "L1"), ("",                  "+L1 forced-prefix")),
-    ((RT_PYTORCH,    "fp32", "L2"), ("",                  "+L2 lastpos")),
-    ((RT_ONNX,       "fp32", "L0"), ("onnx fp32",         "L0 (L2 baked)")),
-    ((RT_ONNX,       "fp32", "L1"), ("",                  "+L1 (L2 baked)")),
-    ((RT_ONNX,       "fp32", "L3"), ("",                  "+L3 prefix-KV")),
-    ((RT_ONNX,       "int8", "L1"), ("onnx int8",         "L1 (L2 baked)")),
-    ((RT_ONNX_GENAI, "fp32", "L0"), ("onnx-genai fp32",   "L0 (L2 baked)")),
-    ((RT_ONNX_GENAI, "fp32", "L1"), ("",                  "+L1 (L2 baked)")),
-    ((RT_OPENVINO,   "fp16", "L0"), ("openvino fp16",     "L0 (L2 baked)")),
-    ((RT_OPENVINO,   "fp16", "L1"), ("",                  "+L1 (L2 baked)")),
-    ((RT_OPENVINO,   "int8", "L1"), ("openvino int8",     "L1 (L2 baked)")),
-    ((RT_LLAMACPP,   "q8_0", "L0"), ("llamacpp q8_0",     "L0 (L2 baked)")),
-    ((RT_LLAMACPP,   "q8_0", "L1"), ("",                  "+L1 (L2 baked)")),
-    ((RT_LLAMACPP,   "q8_0", "L3"), ("",                  "+L3 prefix-KV")),
-    ((RT_LLAMACPP,   "f16",  "L1"), ("llamacpp f16",      "L1 (L2 baked)")),
-    ((RT_LLAMACPP,   "f16",  "L3"), ("",                  "+L3 prefix-KV")),
+    (("pytorch",     "fp32", "L0"), ("pytorch fp32",      "L0")),
+    (("pytorch",     "fp32", "L1"), ("",                  "+L1 forced-prefix")),
+    (("pytorch",     "fp32", "L2"), ("",                  "+L2 lastpos")),
+    (("onnx",        "fp32", "L0"), ("onnx fp32",         "L0 (L2 baked)")),
+    (("onnx",        "fp32", "L1"), ("",                  "+L1 (L2 baked)")),
+    (("onnx",        "fp32", "L3"), ("",                  "+L3 prefix-KV")),
+    (("onnx",        "int8", "L1"), ("onnx int8",         "L1 (L2 baked)")),
+    (("onnx-genai",  "fp32", "L0"), ("onnx-genai fp32",   "L0 (L2 baked)")),
+    (("onnx-genai",  "fp32", "L1"), ("",                  "+L1 (L2 baked)")),
+    (("openvino",    "fp16", "L0"), ("openvino fp16",     "L0 (L2 baked)")),
+    (("openvino",    "fp16", "L1"), ("",                  "+L1 (L2 baked)")),
+    (("openvino",    "int8", "L1"), ("openvino int8",     "L1 (L2 baked)")),
+    (("llamacpp",    "q8_0", "L0"), ("llamacpp q8_0",     "L0 (L2 baked)")),
+    (("llamacpp",    "q8_0", "L1"), ("",                  "+L1 (L2 baked)")),
+    (("llamacpp",    "q8_0", "L3"), ("",                  "+L3 prefix-KV")),
+    (("llamacpp",    "f16",  "L1"), ("llamacpp f16",      "L1 (L2 baked)")),
+    (("llamacpp",    "f16",  "L3"), ("",                  "+L3 prefix-KV")),
     (("rust-candle", "fp32", "L0"), ("rust-candle fp32",  "L0 (L2 baked)")),
     (("rust-candle", "fp32", "L1"), ("",                  "+L1 (L2 baked)")),
     (("rust-candle", "fp32", "L3"), ("",                  "+L3 prefix-KV")),
-    ((RT_VLLM,       "fp16", "L1"), ("vllm cpu fp16",     "default (all baked)")),
+    (("vllm-cpu",    "fp16", "L1"), ("vllm cpu fp16",     "default (all baked)")),
 ]
 
-_EXTRA_FIELDS = set(ResultExtra.__dataclass_fields__)
-assert set(DEFAULT_PRECISION) == set(RUNTIMES)
-assert {"mode", "precision", "opt_level", "template"} <= _EXTRA_FIELDS
 assert all(r in set(RUNTIMES) | {"rust-candle"} and o in OPT_LEVELS
            for (r, _p, o), _label in ROWS)
 
@@ -82,11 +75,8 @@ def latest_per_key(rows: list[dict], key) -> dict:
 
 def result_key(r: dict) -> tuple[str, str, str, str]:
     ex = r.get("extra", {})
-    runtime = r.get("runtime", "")
-    precision = ex.get("precision") or r.get("dtype", "")
-    opt_level = ex.get("opt_level", "")
-    template = ex.get("template", "")
-    return (runtime, precision, opt_level, template)
+    return (r.get("runtime", ""), ex.get("precision", ""),
+            ex.get("opt_level", ""), ex.get("template", ""))
 
 
 def cell(r: dict | None) -> str:
