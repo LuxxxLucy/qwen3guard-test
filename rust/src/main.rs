@@ -128,7 +128,10 @@ fn main() -> Result<()> {
     let mut model = load_model(&dump.model_path, &device)?;
 
     for (template_name, template) in &dump.templates {
-        let l2 = run_l2(
+        // L2 +kv: prime the shared system-prompt prefix once, clone the primed
+        // state per sample, feed only the suffix. Same prefix-KV trick the
+        // ONNX +kv and llama.cpp +kv cells use.
+        let l2_kv = run_l2(
             &mut model,
             &device,
             &dump,
@@ -137,7 +140,20 @@ fn main() -> Result<()> {
             n_warmup,
             template.forced.len().min(sample_cap),
         )?;
-        write_result(&args.out_dir, l2)?;
+        write_result(&args.out_dir, l2_kv)?;
+
+        // L2 (no-kv): feed the full forced sequence per sample, no priming.
+        // The matched baseline for the +kv comparison.
+        let l2_nokv = run_l2_no_kv(
+            &mut model,
+            &device,
+            &dump,
+            template_name,
+            template,
+            n_warmup,
+            template.forced.len().min(sample_cap),
+        )?;
+        write_result(&args.out_dir, l2_nokv)?;
 
         let l0 = run_l0(
             &mut model,
@@ -338,6 +354,53 @@ fn verify_l2_path(
     Ok(correct)
 }
 
+fn run_l2_no_kv(
+    model: &mut ModelForCausalLM,
+    device: &Device,
+    dump: &BenchDump,
+    template_name: &str,
+    template: &TemplateInputs,
+    n_warmup: usize,
+    n_samples: usize,
+) -> Result<BenchResult> {
+    ensure_template_l2(template_name, template)?;
+    // No priming: every sample starts from an empty KV cache and feeds the
+    // full forced_ids (prefix + user content + "Safety: "). The chunked path
+    // is used (matches the +kv path's kernel sequence after the prefix).
+    let latencies = measure(n_warmup, n_samples, |i| {
+        model.clear_kv_cache();
+        predict_l2(
+            model,
+            device,
+            &template.forced[i],
+            0,
+            &template.verdict_token_ids,
+            SuffixPath::Chunked,
+        )?;
+        Ok(())
+    })?;
+
+    let counts: Vec<usize> = template
+        .forced
+        .iter()
+        .take(n_samples)
+        .map(Vec::len)
+        .collect();
+    println!("{template_name} L2 no-kv (full forced sequence per sample)");
+    Ok(make_result(
+        dump,
+        template_name,
+        OptLevel::L2,
+        false,
+        n_samples,
+        n_warmup,
+        median_usize(&counts),
+        1,
+        LatencyStats::from_ms(&latencies),
+        Some(SuffixPath::Chunked),
+    ))
+}
+
 fn run_l0(
     model: &mut ModelForCausalLM,
     device: &Device,
@@ -519,10 +582,12 @@ fn make_result(
 }
 
 fn write_result(out_dir: &Path, result: BenchResult) -> Result<()> {
+    let kv_tag = if result.extra.kv_cache { "_kvcache" } else { "" };
     let filename = format!(
-        "bench_gen_rust-candle_cpu_{}_{}_{}.json",
+        "bench_gen_rust-candle_cpu_{}_{}{}_{}.json",
         result.extra.template,
         result.extra.opt_level,
+        kv_tag,
         timestamp()
     );
     let path = out_dir.join(filename);
