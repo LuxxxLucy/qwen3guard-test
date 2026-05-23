@@ -178,8 +178,9 @@ def main() -> int:
                     help="L0 mode: time the model-card greedy generate() decode "
                          "loop (max_new_tokens=32) over the plain rendered "
                          "prompt instead of the L2 single forced-prefix "
-                         "forward. Implemented for pytorch/openvino/llamacpp; "
-                         "the cross-runtime verify is skipped.")
+                         "forward. Implemented for every runtime; onnx uses the "
+                         "with-past graph (point --artifact at the withpast "
+                         "export). The cross-runtime verify is skipped.")
     ap.add_argument("--last-pos-logits", action="store_true",
                     help="pytorch only: compute the output projection (token "
                          "logits) for the last position only. The L2 path "
