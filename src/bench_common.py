@@ -83,10 +83,6 @@ class BenchResult:
     host: str = ""
     torch_version: str = ""
 
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
-
 
 def write_result(res: BenchResult, out_dir: Path, tag: str = "") -> Path:
     from datetime import datetime, timezone
@@ -102,7 +98,7 @@ def write_result(res: BenchResult, out_dir: Path, tag: str = "") -> Path:
     stamp = res.timestamp_utc.replace(":", "").replace("-", "")
     name = f"bench_{res.variant}_{res.runtime}_{res.device}{tag}_{stamp}.json"
     path = out_dir / name
-    path.write_text(json.dumps(res.to_dict(), indent=2))
+    path.write_text(json.dumps(asdict(res), indent=2))
     return path
 
 

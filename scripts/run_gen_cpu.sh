@@ -44,7 +44,7 @@ THREADS="$(qg_detect_threads)"
 echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  model=$MODEL_ID"
 [[ -n "$DRY_RUN" ]] && echo "[run_gen_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
 
-qg_section "1/8  uv sync (llama-cpp-python built from source)"
+qg_section "1/9  uv sync (llama-cpp-python built from source)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
 # pyproject makes the build native. uv keys its build cache by source-dist
@@ -70,7 +70,7 @@ uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
 qg_step "uv sync" true
 
-qg_section "2/8  download weights + Qwen3GuardTest dataset"
+qg_section "2/9  download weights + Qwen3GuardTest dataset"
 qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
 
 qg_section "3/9  export ONNX (fp32, int8, with-past)"

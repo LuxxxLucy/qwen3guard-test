@@ -69,17 +69,6 @@ class ResultExtra:
     template: Template | None = None
     kv_cache: bool | None = None
     target_user_tokens: int | None = None
-    user_tokens_median: int | None = None
-    n_distinct_samples: int | None = None
-    nominal_template_overhead_tokens: int | None = None
-    cacheable_head_tokens: int | None = None
-    total_input_tokens_median: int | None = None
-    chat_template_applied: bool | None = None
-    prefix_cache: bool | None = None
-    forced_prefix: bool | None = None
-    last_pos_logits: bool | None = None
-    compile: bool | None = None
-    prefill_only: bool | None = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}
