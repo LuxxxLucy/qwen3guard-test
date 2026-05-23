@@ -1,0 +1,53 @@
+# Phase 10 aarch64 portability check. Builds a Linux arm64 image, clones the
+# repo fresh from origin, leaves all sync / build / export / bench work to
+# scripts/run_gen_cpu.sh. On Apple Silicon this runs as native arm64 virt
+# under colima; on Kunpeng 925 it is native bare metal. Same script, same
+# verify criteria.
+#
+# Build:
+#   docker build --platform linux/arm64 -f Dockerfile.aarch64 -t qg-bench:aarch64 .
+#
+# Dry-run (smoke test, ledger only):
+#   docker run --rm --platform linux/arm64 qg-bench:aarch64
+#
+# Real bench (full N_SAMPLES, results land in container /work/results):
+#   docker run --rm --platform linux/arm64 \
+#       -v qg-results:/work/results -v qg-hf-cache:/root/.cache/huggingface \
+#       qg-bench:aarch64 bash scripts/run_gen_cpu.sh
+
+# syntax=docker/dockerfile:1.7
+FROM --platform=linux/arm64 python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# System deps: git for the fresh clone, build-essential / cmake / pkg-config for
+# llama-cpp-python's CMake build, libopenblas-dev for the GGML_BLAS=OpenBLAS
+# backend run_gen_cpu.sh wires in on Linux, curl + ca-certificates for the
+# uv and rustup installers.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential cmake pkg-config libopenblas-dev \
+        curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (Python project + venv manager). The pyproject.toml's no-binary-package
+# entry forces llama-cpp-python from source on every uv sync.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# rustup + cargo for the Rust candle backend. Minimal profile = no docs / src,
+# stable toolchain is enough for `cargo build --release` on candle 0.9.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Fresh clone. REPO_REF defaults to main; override with --build-arg REPO_REF=<sha>
+# to pin a specific commit (useful when re-running an old configuration).
+ARG REPO_URL=https://github.com/LuxxxLucy/qwen3guard-test.git
+ARG REPO_REF=main
+RUN git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /work
+WORKDIR /work
+
+# Default to dry-run: tiny warmup/iteration counts, every runtime still
+# exported and exercised, ledger entries prove portability.
+CMD ["bash", "scripts/run_gen_cpu.sh", "--dry-run"]

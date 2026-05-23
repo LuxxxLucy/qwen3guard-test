@@ -36,7 +36,10 @@ dependencies = [
     "llama-cpp-python>=0.3",
     "accelerate>=0.30",
     "sentencepiece>=0.2",
-    "onnxruntime-genai>=0.13.1",
+    # onnxruntime-genai ships wheels for Mac arm64, Linux x86_64, and Windows,
+    # but not Linux aarch64. Skip the dep there; the bench cell is gated on
+    # `import onnxruntime_genai` and the row is dashed when unavailable.
+    "onnxruntime-genai>=0.13.1; not (sys_platform == 'linux' and platform_machine == 'aarch64')",
 ]
 
 [build-system]

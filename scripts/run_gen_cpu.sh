@@ -70,8 +70,15 @@ qg_step "export onnx" uv run python scripts/export_gen_onnx.py \
     --model-id "$MODEL_ID" --precisions fp32 int8 --with-past
 
 qg_section "4/9  export ONNX Runtime GenAI (fp32, prune_lm_head)"
-qg_step "export onnx-genai" uv run python scripts/export_gen_onnx_genai.py \
-    --model-id "$MODEL_ID" --precisions fp32
+# onnxruntime-genai has no Linux aarch64 wheel (Mac arm64, Linux x86_64, and
+# Windows only). The dep is platform-gated in pyproject.toml; both the export
+# and bench cells gate on `import onnxruntime_genai` and skip cleanly.
+if uv run python -c "import onnxruntime_genai" 2>/dev/null; then
+    qg_step "export onnx-genai" uv run python scripts/export_gen_onnx_genai.py \
+        --model-id "$MODEL_ID" --precisions fp32
+else
+    echo "[skip] onnxruntime-genai not importable on this host (no Linux aarch64 wheel)."
+fi
 
 qg_section "5/9  export OpenVINO (fp16, int8)"
 qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
@@ -111,8 +118,12 @@ gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withp
 # onnx-genai (microsoft/onnxruntime-genai). Built with prune_lm_head=true, so
 # L2 (lastpos) is baked into both the L0 decode loop and the L1 forced-prefix
 # row. Cross-call prefix-KV reuse is not in the GenAI Generator API; no L3.
-gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32"
-gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32" --unoptimized
+if uv run python -c "import onnxruntime_genai" 2>/dev/null; then
+    gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32"
+    gen --runtime onnx-genai --precision fp32 --artifact "ortgenai_models/$BASENAME/fp32" --unoptimized
+else
+    echo "[skip] onnxruntime-genai not importable; dashed row in summary."
+fi
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16"
 gen --runtime openvino --precision int8  --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16" --unoptimized

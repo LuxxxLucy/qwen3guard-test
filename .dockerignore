@@ -1,0 +1,5 @@
+# The Dockerfile clones the repo fresh inside the image; nothing in the build
+# context is COPYd. Excluding everything keeps `docker build` from tar-ing the
+# whole working tree (model artifacts, results, .venv, rust/target).
+*
+!Dockerfile.aarch64
