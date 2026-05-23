@@ -103,7 +103,15 @@ Cells are `p50 / p99` ms when populated.
 
 9. **Sanity-run on Mac.** Full `bash scripts/run_gen_cpu.sh`. Inspect ledger + table. → verify: all populated rows have non-`-` cells; ledger is all PASS.
 
-10. **Kunpeng 925 port.** Cross-arch checks: ONNX Runtime aarch64 wheel, OpenVINO ARM maturity, llama.cpp NEON / SVE, Rust candle on aarch64. → verify: same script runs; numbers populate the same table.
+10. **Kunpeng 925 port.** Pending — needs Kunpeng access. Pre-flight checks on aarch64:
+    - **ONNX Runtime aarch64 wheel** — published on PyPI; `pip install onnxruntime` resolves the right tag.
+    - **ONNX Runtime GenAI aarch64** — wheels for `manylinux2014_aarch64` cp311–cp314 exist; same `uv add onnxruntime-genai` works.
+    - **OpenVINO ARM** — `openvino` (the runtime) and `optimum-intel` both publish aarch64 wheels; ARM CPU plugin uses a different kernel set with no AMX/AVX dependency.
+    - **llama.cpp NEON / SVE** — `GGML_NATIVE=ON` lets ggml pick aarch64 SIMD at build time. Kunpeng 925 is ARMv8 with NEON; SVE is platform-dependent (Kunpeng 920 had no SVE; 925 needs checking).
+    - **Rust candle** — pure-Rust kernels with optional Accelerate / MKL; aarch64 just works via `cargo build --release`. No SIMD intrinsics required for correctness.
+    - **vLLM aarch64** — pre-built `vllm==0.11.0` wheels for `linux_aarch64`. Add `vllm>=0.11` to deps and unguard the bench cell (currently gated on `import vllm` succeeding).
+    - **PyTorch arm64 thread tuning** — Kunpeng 925 has many physical cores; `qg_detect_threads` caps at 16 by `min(detected, 16)`. Confirm 16 is still the right cap (the AMD 5800X result suggested it; re-measure on aarch64).
+    → verify: same script runs end-to-end; ledger all PASS; same table populates with aarch64 numbers.
 
 ## Open questions
 
