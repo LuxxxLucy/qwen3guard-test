@@ -54,6 +54,14 @@ qg_section "1/8  uv sync (llama-cpp-python built from source)"
 # fp16/fp32 prefill GEMM — Accelerate on macOS, OpenBLAS on Linux.
 if [[ "$(uname)" == "Darwin" ]]; then
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple -DGGML_NATIVE=ON"
+elif [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
+    # Linux aarch64: GGML_NATIVE=ON auto-detects flags from /proc/cpuinfo
+    # but under Apple Virtualization Framework (colima on M-series) /proc
+    # reports +fp16fml without the prerequisite +fp16. vfmaq_f16 then fails
+    # to inline. Pin the arch explicitly (matches Kunpeng 925 ARMv8.2-A +
+    # FP16 + dot product; real Kunpeng silicon and Apple Silicon are both
+    # supersets) and turn NATIVE off so the override sticks.
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16+dotprod"
 else
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON"
 fi
