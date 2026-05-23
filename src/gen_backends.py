@@ -125,6 +125,7 @@ class PyTorchCPUBackend(GenBackend):
 class OnnxCPUBackend(GenBackend):
     runtime = "onnx"
     SUPPORTS_KV_CACHE = True
+    SUPPORTS_L0 = True
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         import numpy as np
@@ -147,21 +148,29 @@ class OnnxCPUBackend(GenBackend):
         self.input_names = {i.name for i in self.session.get_inputs()}
         self.output_name = self.session.get_outputs()[0].name
         self.detail = f"onnxruntime {ort.__version__}"
+        # Both --kv-cache (prefix-KV trick) and --unoptimized (L0 decode loop)
+        # need the with-past graph. Probe once; the kv-cache mode also wires
+        # up an IO binding for the persistent prefix.
+        if self.kv_cache or self.unoptimized:
+            self._probe_with_past()
         if self.kv_cache:
             self._setup_kv_cache()
 
-    def _setup_kv_cache(self) -> None:
-        """KV-cache mode needs a with-past graph (past_key_values.* inputs).
-        Record the KV-head shape and pre-make the IO binding."""
+    def _probe_with_past(self) -> None:
+        """Record past_key_values.* input names + KV-head shape from the
+        with-past export. Both --kv-cache and --unoptimized depend on this."""
         past = sorted(n for n in self.input_names if n.startswith("past_key_values."))
         if not past:
             raise SystemExit(
-                "[onnx] --kv-cache needs a with-past export — point --artifact "
-                "at onnx_models/<model>/withpast (export_gen_onnx.py --with-past).")
+                "[onnx] with-past inputs not found — point --artifact at "
+                "onnx_models/<model>/withpast (export_gen_onnx.py --with-past).")
         shape = {i.name: i.shape for i in self.session.get_inputs()}[past[0]]
         self._past_names = past
         self._present_names = [n.replace("past_key_values", "present") for n in past]
         self._kv_heads, self._head_dim = shape[1], shape[3]
+
+    def _setup_kv_cache(self) -> None:
+        """KV-cache mode pre-makes the IO binding for the persistent prefix."""
         self._io = self.session.io_binding()
         self._prefix_len = 0
         self.detail += " +kv-cache"
@@ -207,6 +216,41 @@ class OnnxCPUBackend(GenBackend):
         logits = self.session.run([self.output_name], feeds)[0]
         row = logits[0, -1]
         return [float(row[v]) for v in self.verdict_token_ids]
+
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        """L0 unoptimized: hand-rolled greedy decode over the with-past graph.
+        Matches what an ONNX user writes for batch=1 generation — initial
+        forward over the full prompt with empty past_kv, then L0-1 per-token
+        steps feeding the previous step's present_kv as past_kv. Same per-call
+        KV behaviour as model.generate(use_cache=True) on the other backends."""
+        np = self._np
+        p = len(plain_ids)
+        empty = np.zeros((1, self._kv_heads, 0, self._head_dim), np.float32)
+        feeds: dict = {
+            "input_ids": np.array([plain_ids], np.int64),
+            "attention_mask": np.ones((1, p), np.int64),
+            "position_ids": np.arange(p, dtype=np.int64)[None, :],
+        }
+        feeds.update({n: empty for n in self._past_names})
+        outputs = self.session.run(
+            [self.output_name, *self._present_names], feeds,
+        )
+        logits, past_kv = outputs[0], outputs[1:]
+        for step in range(L0_MAX_NEW_TOKENS - 1):
+            next_token = int(logits[0, -1].argmax())
+            new_pos = p + step
+            feeds = {
+                "input_ids": np.array([[next_token]], np.int64),
+                "attention_mask": np.ones((1, new_pos + 1), np.int64),
+                "position_ids": np.array([[new_pos]], np.int64),
+            }
+            for name, kv in zip(self._past_names, past_kv):
+                feeds[name] = kv
+            outputs = self.session.run(
+                [self.output_name, *self._present_names], feeds,
+            )
+            logits, past_kv = outputs[0], outputs[1:]
+        return 0
 
 
 class OpenVINOCPUBackend(GenBackend):

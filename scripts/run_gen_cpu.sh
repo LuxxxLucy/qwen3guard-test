@@ -101,6 +101,9 @@ gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/fp32"
 gen --runtime onnx     --precision int8  --artifact "onnx_models/$BASENAME/int8"
 # ONNX again with the shared system-prompt prefix KV-cached (with-past graph).
 gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withpast" --kv-cache
+# ONNX L0 baseline: hand-rolled decode loop over the with-past graph — same
+# per-call KV behaviour as generate(use_cache=True) on the other backends.
+gen --runtime onnx     --precision fp32  --artifact "onnx_models/$BASENAME/withpast" --unoptimized
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16"
 gen --runtime openvino --precision int8  --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16" --unoptimized
