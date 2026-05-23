@@ -16,24 +16,28 @@ from contract import DEFAULT_PRECISION, OPT_LEVELS, RUNTIMES, TEMPLATES, ResultE
 RT_PYTORCH, RT_ONNX, RT_OPENVINO, RT_LLAMACPP = RUNTIMES
 OPT_LP, OPT_L0, OPT_L1, OPT_L2, OPT_L2_LASTPOS, OPT_L3 = OPT_LEVELS
 
-# (runtime, precision, opt_level, kv_cache) -> row label. Order = table order.
+# (runtime, precision, opt_level, kv_cache) -> row label. Order = table order:
+# per backend, L0 (unoptimized) then L2 variants progressively layering tricks.
+# See LEGEND below for what each label means.
 ROWS: list[tuple[tuple[str, str, str, bool], str]] = [
-    ((RT_PYTORCH,     "fp32",   OPT_L0, False), "pytorch (L0)"),
-    ((RT_PYTORCH,     "fp32",   OPT_L2, False), "pytorch (L2)"),
-    ((RT_PYTORCH,     "fp32",   OPT_L2_LASTPOS, False), "pytorch (L2 last-pos)"),
-    ((RT_ONNX,        "fp32",   OPT_L2, False), "onnx fp32"),
-    ((RT_ONNX,        "int8",   OPT_L2, False), "onnx int8"),
-    ((RT_ONNX,        "fp32",   OPT_L2, True),  "onnx fp32 +kv"),
-    ((RT_OPENVINO,    "fp16",   OPT_L0, False), "openvino (L0)"),
-    ((RT_OPENVINO,    "fp16",   OPT_L2, False), "openvino fp16"),
-    ((RT_OPENVINO,    "int8",   OPT_L2, False), "openvino int8"),
-    ((RT_LLAMACPP,    "q8_0",   OPT_L0, False), "llamacpp (L0)"),
-    ((RT_LLAMACPP,    "q8_0",   OPT_L2, False), "llamacpp q8_0"),
-    ((RT_LLAMACPP,    "q8_0",   OPT_L2, True),  "llamacpp q8_0 +kv"),
-    ((RT_LLAMACPP,    "f16",    OPT_L2, False), "llamacpp f16"),
-    ((RT_LLAMACPP,    "f16",    OPT_L2, True),  "llamacpp f16 +kv"),
-    (("rust-candle", "fp32",   OPT_L0, False), "rust-candle (L0)"),
-    (("rust-candle", "fp32",   OPT_L2, True),  "rust-candle (L2)"),
+    ((RT_PYTORCH,    "fp32", OPT_L0,         False), "pytorch L0"),
+    ((RT_PYTORCH,    "fp32", OPT_L2,         False), "pytorch L2"),
+    ((RT_PYTORCH,    "fp32", OPT_L2_LASTPOS, False), "pytorch L2 +lastpos"),
+    ((RT_ONNX,       "fp32", OPT_L0,         False), "onnx fp32 L0"),
+    ((RT_ONNX,       "fp32", OPT_L2,         False), "onnx fp32 L2"),
+    ((RT_ONNX,       "fp32", OPT_L2,         True),  "onnx fp32 L2 +kv"),
+    ((RT_ONNX,       "int8", OPT_L2,         False), "onnx int8 L2"),
+    ((RT_OPENVINO,   "fp16", OPT_L0,         False), "openvino fp16 L0"),
+    ((RT_OPENVINO,   "fp16", OPT_L2,         False), "openvino fp16 L2"),
+    ((RT_OPENVINO,   "int8", OPT_L2,         False), "openvino int8 L2"),
+    ((RT_LLAMACPP,   "q8_0", OPT_L0,         False), "llamacpp q8_0 L0"),
+    ((RT_LLAMACPP,   "q8_0", OPT_L2,         False), "llamacpp q8_0 L2"),
+    ((RT_LLAMACPP,   "q8_0", OPT_L2,         True),  "llamacpp q8_0 L2 +kv"),
+    ((RT_LLAMACPP,   "f16",  OPT_L2,         False), "llamacpp f16 L2"),
+    ((RT_LLAMACPP,   "f16",  OPT_L2,         True),  "llamacpp f16 L2 +kv"),
+    (("rust-candle", "fp32", OPT_L0,         False), "rust-candle L0"),
+    (("rust-candle", "fp32", OPT_L2,         False), "rust-candle L2"),
+    (("rust-candle", "fp32", OPT_L2,         True),  "rust-candle L2 +kv"),
 ]
 
 _EXTRA_FIELDS = set(ResultExtra.__dataclass_fields__)
@@ -125,6 +129,21 @@ PARAGRAPH = (
 )
 
 
+LEGEND = """## Legend
+
+The columns are the two input templates: **original** (the model card's built-in Qwen3Guard system prompt, ~296-token overhead) and **test-200** (a compressed policy with ~130-token overhead).
+
+The rows are an optimization ladder per backend. Within each backend the rows progress unoptimized → optimized; the labels name which tricks are on:
+
+- **L0** — unoptimized. `tokenize → generate() decode loop (~32 tokens) → parse 'Safety: <verdict>'`. The model-card path. Per-call KV cache during the decode is on (it's what `generate()` does); none of the cross-call tricks below are.
+
+- **L2** — `+forced-prefix`. Teacher-force `"Safety: "` and read the 3 verdict logits from one forward pass. No decode loop.
+
+- **L2 +lastpos** — `+last-position lm_head`. L2 plus restrict the output projection to the last position only — skip the ~200 prompt-position logits that nobody reads. PyTorch exposes this via `logits_to_keep=1`. ONNX and OpenVINO bake it into the export; llama.cpp and Rust candle do it by default. So only PyTorch shows a separate `+lastpos` row.
+
+- **L2 +kv** — `+system-prompt KV cache`. L2 plus precompute the shared system-prompt prefix KV once and reuse it across calls. Per-call cost shrinks to the variable-suffix forward. ONNX uses the with-past graph + IO binding; llama.cpp rewinds its context in place; Rust candle clones the primed model. PyTorch and OpenVINO don't have this mode in the bench."""
+
+
 def write_report(table: list[list[str]], path: Path) -> None:
     md = render_markdown(table)
     path.write_text(
@@ -132,6 +151,8 @@ def write_report(table: list[list[str]], path: Path) -> None:
         + md
         + "\n\n"
         + PARAGRAPH
+        + "\n\n"
+        + LEGEND
         + "\n"
     )
 
