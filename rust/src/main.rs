@@ -364,6 +364,30 @@ fn run_l2_no_kv(
     n_samples: usize,
 ) -> Result<BenchResult> {
     ensure_template_l2(template_name, template)?;
+    // Verify the no-kv path against the PyTorch-L2 oracle on the first 10
+    // samples before the timed loop. Catches a wrong-position-offset or
+    // wrong-tokens-fed bug loudly instead of letting silent drift through.
+    let verify_n = 10.min(template.forced.len()).min(template.expected_verdicts.len());
+    let mut agree = 0usize;
+    for i in 0..verify_n {
+        model.clear_kv_cache();
+        let pred = predict_l2(
+            model,
+            device,
+            &template.forced[i],
+            0,
+            &template.verdict_token_ids,
+            SuffixPath::Chunked,
+        )?;
+        if pred == template.expected_verdicts[i] {
+            agree += 1;
+        }
+    }
+    println!("{template_name} L2 no-kv verify {agree}/{verify_n}");
+    if agree < verify_n {
+        bail!("{template_name} L2 no-kv: verdict mismatch vs PyTorch-L2 oracle ({agree}/{verify_n})");
+    }
+
     // No priming: every sample starts from an empty KV cache and feeds the
     // full forced_ids (prefix + user content + "Safety: "). The chunked path
     // is used (matches the +kv path's kernel sequence after the prefix).
@@ -386,7 +410,6 @@ fn run_l2_no_kv(
         .take(n_samples)
         .map(Vec::len)
         .collect();
-    println!("{template_name} L2 no-kv (full forced sequence per sample)");
     Ok(make_result(
         dump,
         template_name,
