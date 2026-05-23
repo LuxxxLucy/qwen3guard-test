@@ -50,7 +50,10 @@ def reference_logits(model_id: str, samples: list[list[int]],
     key = hashlib.sha1(
         (model_id + json.dumps(samples) + str(verdict_token_ids)).encode()
     ).hexdigest()[:16]
-    cache = Path("results") / f".lm_head_ref_{key}.json"
+    # Cache the reference outside results/ so summarize_cpu's glob doesn't
+    # see it. The summary tolerates non-result JSONs (warns and skips) but
+    # there's no reason to make it work for them.
+    cache = Path("results/.cache") / f"lm_head_ref_{key}.json"
     if cache.exists():
         print(f"[verify-lm-head] reference: cached ({cache.name})", flush=True)
         return json.loads(cache.read_text())

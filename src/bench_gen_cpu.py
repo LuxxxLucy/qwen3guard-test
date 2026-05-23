@@ -127,15 +127,16 @@ def run_cell(backend, samples: list[list[int]], args, length: int | None,
         tag += "_kvcache"
     path = write_result(res, Path(args.out_dir), tag=tag)
     lt = res.latency
+    kv_tag = " +kv" if args.kv_cache else ""
     if args.verbose:
-        print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {opt_level} "
+        print(f"[bench-gen-cpu] {backend.runtime}/{backend.precision} {opt_level}{kv_tag} "
               f"{template} {mode} len={median_tokens}  p50={lt.p50_ms:.1f}ms "
               f"p95={lt.p95_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
               f"thr={lt.throughput_rps:.2f} rps")
         print(f"[bench-gen-cpu] wrote {path}")
     else:
         mode_part = "" if length is None else f" {mode}"
-        print(f"[gen] {backend.runtime}/{backend.precision} {opt_level} "
+        print(f"[gen] {backend.runtime}/{backend.precision} {opt_level}{kv_tag} "
               f"{template}{mode_part} len={median_tokens}  "
               f"p50={lt.p50_ms:.1f}ms p99={lt.p99_ms:.1f}ms "
               f"thr={lt.throughput_rps:.2f} rps")
