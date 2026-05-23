@@ -49,11 +49,16 @@ class GenBackend(ABC):
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         raise NotImplementedError
 
-    @abstractmethod
     def verdict_logits(self, forced_ids: list[int]) -> list[float]:
         """Last-position logits for the 3 verdict token ids, in VERDICT_LABELS
-        order. The forward pass plus this read is the timed region."""
-        raise NotImplementedError
+        order. The forward pass plus this read is the timed region.
+        Backends that override predict() directly (e.g. vLLM) skip this."""
+        raise NotImplementedError(f"{self.runtime} backend has no verdict_logits")
+
+    def _read_verdicts(self, last_row) -> list[float]:
+        """Extract the 3 verdict logits from a last-position row indexable by
+        token id. Works for torch tensors, numpy arrays, and ctypes pointers."""
+        return [float(last_row[v]) for v in self.verdict_token_ids]
 
     def prime_prefix(self, prefix_ids: list[int]) -> None:
         """KV-cache mode: evaluate the shared system-prompt prefix once so
@@ -108,7 +113,7 @@ class PyTorchCPUBackend(GenBackend):
                              use_cache=False,
                              logits_to_keep=1 if self.last_pos_logits else 0)
         row = out.logits[0, -1]
-        return [float(row[v]) for v in self.verdict_token_ids]
+        return self._read_verdicts(row)
 
     def decode_l0(self, plain_ids: list[int]) -> int:
         torch = self._torch
@@ -206,7 +211,7 @@ class OnnxCPUBackend(GenBackend):
             self._io.bind_output(self.output_name)
             self.session.run_with_iobinding(self._io)
             row = self._io.get_outputs()[0].numpy()[0, -1]
-            return [float(row[v]) for v in self.verdict_token_ids]
+            return self._read_verdicts(row)
         arr = np.array([forced_ids], dtype=np.int64)
         feeds = {"input_ids": arr}
         if "attention_mask" in self.input_names:
@@ -215,7 +220,7 @@ class OnnxCPUBackend(GenBackend):
             feeds["position_ids"] = np.arange(len(forced_ids), dtype=np.int64)[None, :]
         logits = self.session.run([self.output_name], feeds)[0]
         row = logits[0, -1]
-        return [float(row[v]) for v in self.verdict_token_ids]
+        return self._read_verdicts(row)
 
     def decode_l0(self, plain_ids: list[int]) -> int:
         """L0 unoptimized: hand-rolled greedy decode over the with-past graph.
@@ -293,7 +298,7 @@ class OnnxGenAICPUBackend(GenBackend):
         # append_tokens runs the prefill forward; get_logits then yields the
         # last-position logits over the full vocab.
         row = self._np.asarray(self._gen.get_logits()).reshape(-1)
-        return [float(row[v]) for v in self.verdict_token_ids]
+        return self._read_verdicts(row)
 
     def decode_l0(self, plain_ids: list[int]) -> int:
         """L0: greedy decode loop driven by the GenAI Generator. append_tokens
@@ -332,7 +337,7 @@ class OpenVINOCPUBackend(GenBackend):
         t = torch.tensor([forced_ids], dtype=torch.long)
         out = self.model(input_ids=t, attention_mask=torch.ones_like(t))
         row = out.logits[0, -1]
-        return [float(row[v]) for v in self.verdict_token_ids]
+        return self._read_verdicts(row)
 
     def decode_l0(self, plain_ids: list[int]) -> int:
         torch = self._torch
@@ -388,10 +393,6 @@ class VLLMCPUBackend(GenBackend):
         except ValueError:
             return 0
 
-    def verdict_logits(self, forced_ids: list[int]) -> list[float]:
-        # Not called — predict() is overridden directly. Stub satisfies the ABC.
-        raise NotImplementedError("vLLM backend exposes predict() directly")
-
 
 class LlamaCppBackend(GenBackend):
     runtime = "llamacpp"
@@ -446,7 +447,7 @@ class LlamaCppBackend(GenBackend):
             self.llm.reset()
             self.llm.eval(forced_ids)
         row = self._get_logits(self._ctx, -1)
-        return [float(row[v]) for v in self.verdict_token_ids]
+        return self._read_verdicts(row)
 
     def decode_l0(self, plain_ids: list[int]) -> int:
         """L0: native greedy decode loop. Eval the prompt once, then for each
