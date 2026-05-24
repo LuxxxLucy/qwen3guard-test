@@ -36,13 +36,13 @@ def main() -> int:
                 print(f"[ct2-export] {dest} exists; skipping (use --force to overwrite)")
                 continue
             shutil.rmtree(dest)
+        # No --copy_files: the bench loads the HF tokenizer by model_id, so CT2
+        # only needs model.bin + config.json + vocabulary.json (auto-emitted).
         cmd = [
             "ct2-transformers-converter",
             "--model", args.model_id,
             "--output_dir", str(dest),
             "--quantization", prec_map[prec],
-            "--copy_files", "tokenizer.json", "tokenizer_config.json",
-                            "special_tokens_map.json", "vocab.json", "merges.txt",
         ]
         print(f"[ct2-export] {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
