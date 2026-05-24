@@ -22,6 +22,9 @@ qg_export_thread_caps() {
     export OPENBLAS_NUM_THREADS="$n"
     export VECLIB_MAXIMUM_THREADS="$n"
     export NUMEXPR_NUM_THREADS="$n"
+    # Rust candle's CPU backend uses rayon for parallel ops; without this,
+    # rayon defaults to num_cpus (= 24 on Kunpeng 920 / 24 vCPU), oversubscribing.
+    export RAYON_NUM_THREADS="$n"
 }
 
 qg_detect_threads() {
