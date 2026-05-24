@@ -54,19 +54,12 @@ echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  
 
 qg_section "1/10 uv sync (llama-cpp-python built from source)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
-# (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. no-binary-package in
-# pyproject makes the build native. uv keys its build cache by source-dist
-# hash, not by CMAKE_ARGS, so a cached wheel is reused even with different
-# flags — `uv cache clean` evicts it so the rebuild actually honors CMAKE_ARGS.
-# GGML_NATIVE builds for the host CPU; CMAKE_ARGS adds a BLAS backend for the
-# fp16/fp32 prefill GEMM — Accelerate on macOS, OpenBLAS on Linux.
+# (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. uv keys its build cache
+# by source-dist hash, not by CMAKE_ARGS, so `uv cache clean` evicts the cached
+# wheel and the rebuild honors current CMAKE_ARGS.
 if [[ "$(uname)" == "Darwin" ]]; then
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple -DGGML_NATIVE=ON"
 else
-    # Linux: GGML_NATIVE=ON enables every ISA /proc/cpuinfo advertises — SVE +
-    # BF16 + I8MM + FP16 + dotprod on Kunpeng 920, AVX2/AVX-512 on x86_64.
-    # KleidiAI is Arm's hand-tuned GEMM library (int8 + bf16 + i8mm kernels)
-    # that llama.cpp picks up via -DGGML_CPU_KLEIDIAI=ON. No-op on x86_64.
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON -DGGML_CPU_KLEIDIAI=ON"
 fi
 uv cache clean llama-cpp-python
@@ -101,9 +94,9 @@ qg_section "5/10 export OpenVINO (fp16, int8)"
 qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp16 int8
 
-qg_section "6/10 export GGUF (f32, f16, q8_0)"
+qg_section "6/10 export GGUF (f32, f16, q8_0, q4_K_M)"
 qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
-    --model-id "$MODEL_ID" --quants f32 f16 q8_0
+    --model-id "$MODEL_ID" --quants f32 f16 q8_0 q4_K_M
 
 qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
@@ -121,6 +114,19 @@ qg_step "verify (all rows)" bash scripts/verify_correctness.sh --model-id "$MODE
 qg_section "10/10 benchmarks"
 gen() {
     qg_step "gen $*" uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
+        "${DRY_GEN[@]}" "$@"
+    echo
+}
+# gen_llama: per-cell env override for llama.cpp. ARMV8 (NEON-only) sgemm in
+# OpenBLAS 0.3.26 is ~13% faster than the default armv8sve dispatch for
+# llama.cpp's ggml-blas matmul path on Kunpeng 920. For pytorch the same swap
+# regresses L2 lastpos (the M=1 lm_head GEMV, 540 -> 826 ms) because SVE's
+# wider lanes win on small-M GEMV. Scoping the env to llama.cpp gen() calls
+# keeps both winning paths.
+gen_llama() {
+    qg_step "gen $*" env OPENBLAS_CORETYPE=ARMV8 \
+        uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
         --n-samples "$N_SAMPLES" --threads "$THREADS" \
         "${DRY_GEN[@]}" "$@"
     echo
@@ -151,17 +157,21 @@ fi
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16"
 gen --runtime openvino --precision int8  --artifact "ov_models/$BASENAME/int8"
 gen --runtime openvino --precision fp16  --artifact "ov_models/$BASENAME/fp16" --unoptimized
-gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"
+gen_llama --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"
 # llama.cpp again with the shared system-prompt prefix KV-cached.
-gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --kv-cache
-gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --unoptimized
+gen_llama --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --kv-cache
+gen_llama --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0.gguf"   --unoptimized
 # f16 GGUF — with a BLAS backend its prefill GEMM is the fastest CPU path.
-gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"
-gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"    --kv-cache
+gen_llama --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"
+gen_llama --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"    --kv-cache
 # f32 GGUF — uncompressed baseline. Slowest llama.cpp row but anchors the
 # precision ladder against pytorch/onnx fp32.
-gen --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"
-gen --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"    --kv-cache
+gen_llama --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"
+gen_llama --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"    --kv-cache
+# q4_K_M GGUF — K-quant 4-bit, the recommended "small but accurate" path.
+# Uses ggml's K-quant matmul kernels (KleidiAI int4/int8 dispatch on aarch64).
+gen_llama --runtime llamacpp --precision q4_K_M --artifact "gguf_models/$BASENAME.q4_K_M.gguf"
+gen_llama --runtime llamacpp --precision q4_K_M --artifact "gguf_models/$BASENAME.q4_K_M.gguf" --kv-cache
 
 echo "--- Gen: rust-candle ---"
 qg_step "gen rust-candle" rust/target/release/qwen3guard-bench \
