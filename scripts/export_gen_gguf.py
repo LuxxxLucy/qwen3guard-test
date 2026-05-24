@@ -43,7 +43,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-id", default="Qwen/Qwen3Guard-Gen-0.6B")
     ap.add_argument("--quants", nargs="+", default=["q8_0"],
-                    choices=["f16", "q8_0"])
+                    choices=["f32", "f16", "q8_0"])
     args = ap.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

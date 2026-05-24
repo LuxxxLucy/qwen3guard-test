@@ -47,6 +47,7 @@ BASENAME="$(basename "$MODEL_ID")"
 # pinning to a higher physical-core count just adds scheduling noise.
 THREADS="$(qg_detect_threads)"
 [[ "$THREADS" -gt 16 ]] && THREADS=16
+qg_export_thread_caps "$THREADS"
 
 echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  model=$MODEL_ID"
 [[ -n "$DRY_RUN" ]] && echo "[run_gen_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
@@ -64,7 +65,9 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
     # Linux: GGML_NATIVE=ON enables every ISA /proc/cpuinfo advertises — SVE +
     # BF16 + I8MM + FP16 + dotprod on Kunpeng 920, AVX2/AVX-512 on x86_64.
-    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON"
+    # KleidiAI is Arm's hand-tuned GEMM library (int8 + bf16 + i8mm kernels)
+    # that llama.cpp picks up via -DGGML_CPU_KLEIDIAI=ON. No-op on x86_64.
+    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON -DGGML_CPU_KLEIDIAI=ON"
 fi
 uv cache clean llama-cpp-python
 uv sync --reinstall-package llama-cpp-python \
@@ -98,9 +101,9 @@ qg_section "5/10 export OpenVINO (fp16, int8)"
 qg_step "export openvino" uv run python scripts/export_gen_openvino.py \
     --model-id "$MODEL_ID" --precisions fp16 int8
 
-qg_section "6/10 export GGUF (f16, q8_0)"
+qg_section "6/10 export GGUF (f32, f16, q8_0)"
 qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
-    --model-id "$MODEL_ID" --quants f16 q8_0
+    --model-id "$MODEL_ID" --quants f32 f16 q8_0
 
 qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
@@ -155,6 +158,10 @@ gen --runtime llamacpp --precision q8_0   --artifact "gguf_models/$BASENAME.q8_0
 # f16 GGUF — with a BLAS backend its prefill GEMM is the fastest CPU path.
 gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"
 gen --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAME.f16.gguf"    --kv-cache
+# f32 GGUF — uncompressed baseline. Slowest llama.cpp row but anchors the
+# precision ladder against pytorch/onnx fp32.
+gen --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"
+gen --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"    --kv-cache
 
 echo "--- Gen: rust-candle ---"
 qg_step "gen rust-candle" rust/target/release/qwen3guard-bench \

@@ -83,6 +83,10 @@ verify --runtime llamacpp --precision f16  --opt-level L1 \
     --artifact "gguf_models/$BASENAME.f16.gguf"
 verify --runtime llamacpp --precision f16  --opt-level L3 \
     --artifact "gguf_models/$BASENAME.f16.gguf"
+verify --runtime llamacpp --precision f32  --opt-level L1 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+verify --runtime llamacpp --precision f32  --opt-level L3 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
 
 # rust-candle -- dump L0/L1/L3 once, verify each from the same JSON.
 qg_step "rust verify dump" rust/target/release/qwen3guard-bench \

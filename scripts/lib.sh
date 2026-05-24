@@ -11,6 +11,19 @@ qg_setup_env() {
     export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
 }
 
+qg_export_thread_caps() {
+    # Cap the underlying BLAS / OpenMP thread pools to the same N the bench
+    # passes via --threads. Without these, PyTorch's set_num_threads(N) only
+    # caps the intraop pool; MKL / OpenBLAS / OpenMP keep their defaults
+    # (often = logical CPU count), so the actual core load drifts above N.
+    local n="$1"
+    export OMP_NUM_THREADS="$n"
+    export MKL_NUM_THREADS="$n"
+    export OPENBLAS_NUM_THREADS="$n"
+    export VECLIB_MAXIMUM_THREADS="$n"
+    export NUMEXPR_NUM_THREADS="$n"
+}
+
 qg_detect_threads() {
     # Physical-core count, perf-cores only when the OS exposes the split.
     # Logical / SMT counts make benchmarks noisier without raising throughput

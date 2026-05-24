@@ -1,7 +1,14 @@
-# Compile candle and this crate for the CPU running the build. Plain
-# `cargo build --release` targets the baseline ISA (x86-64-v1 / baseline
-# ARMv8); candle's CPU kernels then skip AVX2 / AVX-512 / the ARM dot-product
-# extensions and run several times slower. target-cpu=native resolves per
-# build host, so the 5800X and the Kunpeng 920 each get their own ISA.
+# Compile candle and this crate for the CPU running the build.
+#
+# target-cpu=native handles x86_64 hosts and well-known Arm cores (Apple
+# Silicon, Neoverse). On HiSilicon TaiShan (Kunpeng 920) LLVM has no
+# tuning model and falls back to a conservative aarch64 feature set —
+# `rustc --print cfg -C target-cpu=native` enables sve and fp16 but
+# misses i8mm, bf16, dotprod, f32mm/f64mm. Listing them explicitly is a
+# no-op where target-cpu=native already enabled them and a real lift
+# where it did not.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "target-feature=+i8mm,+bf16,+dotprod,+fp16fml,+f32mm,+f64mm",
+]
