@@ -34,6 +34,7 @@ dependencies = [
     "optimum-onnx>=0.1",
     "optimum-intel[openvino]>=1.21",
     "llama-cpp-python>=0.3",
+    "ctranslate2>=4.7",
     "accelerate>=0.30",
     "sentencepiece>=0.2",
     # onnxruntime-genai ships wheels for Mac arm64, Linux x86_64, and Windows,

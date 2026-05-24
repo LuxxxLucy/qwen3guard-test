@@ -98,6 +98,10 @@ qg_section "6/10 export GGUF (f32, f16, q8_0, q4_K_M)"
 qg_step "export gguf" uv run python scripts/export_gen_gguf.py \
     --model-id "$MODEL_ID" --quants f32 f16 q8_0 q4_K_M
 
+qg_section "6b/10 export CTranslate2 (fp32)"
+qg_step "export ctranslate2" uv run python scripts/export_gen_ctranslate2.py \
+    --model-id "$MODEL_ID" --precisions fp32
+
 qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
@@ -177,6 +181,10 @@ echo "--- Gen: rust-candle ---"
 qg_step "gen rust-candle" rust/target/release/qwen3guard-bench \
     --input rust/bench_inputs.json --out-dir results "${DRY_RUST[@]}"
 echo
+
+# CTranslate2 CPU: single fp32 row, all tricks baked in (forward_batch's
+# last-position slice gives L2 baked + L1 forced-prefix).
+gen --runtime ctranslate2 --precision fp32 --artifact "ct2_models/$BASENAME-fp32"
 
 # vLLM CPU: single-row baseline, no trick ladder. vLLM bakes its own paged
 # attention, KV management, and last-position sampling. The Qwen3-supporting

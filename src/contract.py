@@ -26,27 +26,31 @@ OptLevel = Literal["L0", "L1", "L2", "L3"]
 OPT_LEVELS: tuple[OptLevel, ...] = ("L0", "L1", "L2", "L3")
 
 # --- runtimes --------------------------------------------------------------
-Runtime = Literal["pytorch", "onnx", "onnx-genai", "openvino", "llamacpp", "vllm-cpu"]
+Runtime = Literal["pytorch", "onnx", "onnx-genai", "openvino", "llamacpp",
+                  "vllm-cpu", "ctranslate2"]
 RUNTIMES: tuple[Runtime, ...] = (
     "pytorch", "onnx", "onnx-genai", "openvino", "llamacpp", "vllm-cpu",
+    "ctranslate2",
 )
 
 DEFAULT_PRECISION: dict[Runtime, str] = {
-    "pytorch":    "fp32",
-    "onnx":       "fp32",
-    "onnx-genai": "fp32",
-    "openvino":   "fp16",
-    "llamacpp":   "f16",
-    "vllm-cpu":   "fp16",
+    "pytorch":     "fp32",
+    "onnx":        "fp32",
+    "onnx-genai":  "fp32",
+    "openvino":    "fp16",
+    "llamacpp":    "f16",
+    "vllm-cpu":    "fp16",
+    "ctranslate2": "fp32",
 }
 
 PROVIDER_TAG: dict[Runtime, str] = {
-    "pytorch":    "torch-cpu",
-    "onnx":       "CPUExecutionProvider",
-    "onnx-genai": "ort-genai-cpu",
-    "openvino":   "OpenVINO-CPU",
-    "llamacpp":   "llama.cpp-cpu",
-    "vllm-cpu":   "vllm-cpu",
+    "pytorch":     "torch-cpu",
+    "onnx":        "CPUExecutionProvider",
+    "onnx-genai":  "ort-genai-cpu",
+    "openvino":    "OpenVINO-CPU",
+    "llamacpp":    "llama.cpp-cpu",
+    "vllm-cpu":    "vllm-cpu",
+    "ctranslate2": "ctranslate2-cpu",
 }
 
 # --- templates -------------------------------------------------------------
