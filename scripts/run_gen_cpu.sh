@@ -62,30 +62,16 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON -DGGML_CPU_KLEIDIAI=ON"
 fi
-# Two-phase sync on Linux aarch64 to layer in the +kopt3 ggml-cpu patches:
-#   1. clean + sync extracts the sdist + builds the unpatched wheel.
-#   2. patch the extracted sdist (scripts/patch_llamacpp_aarch64.py), evict
-#      only the built wheel + archive, then re-sync to rebuild from the
-#      patched source. The patch script is idempotent and exits 0 cleanly on
-#      non-aarch64 hosts where the targeted #if blocks are not active.
 uv cache clean llama-cpp-python
 uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
-if [[ "$(uname -m)" == "aarch64" ]]; then
-    uv run python scripts/patch_llamacpp_aarch64.py \
-        || { echo "[fatal] patch_llamacpp_aarch64.py failed"; exit 1; }
-    # Evict just the built wheel + archive (keep the patched sdist) so that
-    # the next sync rebuilds from the modified C/C++ sources.
-    for d in /root/.cache/uv/sdists-v9/index/*/llama-cpp-python/*/*; do
-        find "$d" -maxdepth 1 -name 'llama_cpp_python-*.whl' -delete 2>/dev/null
-        find "$d" -maxdepth 1 -type d -name 'llama_cpp_python-*' \
-            -not -name '*.dist-info' -exec rm -rf {} + 2>/dev/null
-    done
-    find /root/.cache/uv/archive-v* -maxdepth 2 -type d -name 'llama_cpp*' \
-        -exec rm -rf {} + 2>/dev/null
-    uv sync --reinstall-package llama-cpp-python \
-        || { echo "[fatal] re-sync after patches failed"; exit 1; }
-fi
+# Note: scripts/patch_llamacpp_aarch64.py contains source-level SVE/NEON
+# patches for ggml-cpu (RMSNorm fused, fp32<->fp16 SIMD). Validated in R7.kernel
+# but showed no measurable speedup — the dominant cost is OpenBLAS sgemm, not
+# the patched ops. Auto-apply during build is disabled because the wheel-cache
+# eviction step it requires occasionally produces a malformed wheel on Kunpeng.
+# To apply manually: uv run python scripts/patch_llamacpp_aarch64.py then
+# uv cache clean llama-cpp-python && uv sync --reinstall-package llama-cpp-python.
 qg_step "uv sync" true
 
 qg_section "2/10 download weights + Qwen3GuardTest dataset"
