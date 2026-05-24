@@ -52,7 +52,7 @@ qg_export_thread_caps "$THREADS"
 echo "[run_gen_cpu] host=$(uname -srm)  threads=$THREADS  n_samples=$N_SAMPLES  model=$MODEL_ID"
 [[ -n "$DRY_RUN" ]] && echo "[run_gen_cpu] DRY RUN — smoke test only, latency numbers are not meaningful."
 
-qg_section "1/10 uv sync (llama-cpp-python built from source)"
+qg_section "1/10 uv sync (llama-cpp-python built from source, +kopt3 patches on aarch64)"
 # Rebuild llama-cpp-python from source every run: the prebuilt wheel is generic
 # (no AVX2 / ARM dot-product) and benchmarks 5-7x slow. uv keys its build cache
 # by source-dist hash, not by CMAKE_ARGS, so `uv cache clean` evicts the cached
@@ -62,9 +62,30 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON -DGGML_CPU_KLEIDIAI=ON"
 fi
+# Two-phase sync on Linux aarch64 to layer in the +kopt3 ggml-cpu patches:
+#   1. clean + sync extracts the sdist + builds the unpatched wheel.
+#   2. patch the extracted sdist (scripts/patch_llamacpp_aarch64.py), evict
+#      only the built wheel + archive, then re-sync to rebuild from the
+#      patched source. The patch script is idempotent and exits 0 cleanly on
+#      non-aarch64 hosts where the targeted #if blocks are not active.
 uv cache clean llama-cpp-python
 uv sync --reinstall-package llama-cpp-python \
     || { echo "[fatal] uv sync failed — fix the environment and retry."; exit 1; }
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    uv run python scripts/patch_llamacpp_aarch64.py \
+        || { echo "[fatal] patch_llamacpp_aarch64.py failed"; exit 1; }
+    # Evict just the built wheel + archive (keep the patched sdist) so that
+    # the next sync rebuilds from the modified C/C++ sources.
+    for d in /root/.cache/uv/sdists-v9/index/*/llama-cpp-python/*/*; do
+        find "$d" -maxdepth 1 -name 'llama_cpp_python-*.whl' -delete 2>/dev/null
+        find "$d" -maxdepth 1 -type d -name 'llama_cpp_python-*' \
+            -not -name '*.dist-info' -exec rm -rf {} + 2>/dev/null
+    done
+    find /root/.cache/uv/archive-v* -maxdepth 2 -type d -name 'llama_cpp*' \
+        -exec rm -rf {} + 2>/dev/null
+    uv sync --reinstall-package llama-cpp-python \
+        || { echo "[fatal] re-sync after patches failed"; exit 1; }
+fi
 qg_step "uv sync" true
 
 qg_section "2/10 download weights + Qwen3GuardTest dataset"
@@ -216,6 +237,31 @@ gen_llama_kopt2() {
         "${DRY_GEN[@]}" "$@"
     echo
 }
+# gen_llama_kopt3: f32 +kernel-opt round 3. Same OpenBLAS-OMP + NEOVERSEN2 env
+# as kopt; the win comes from C/C++-source patches to ggml-cpu applied by
+# scripts/patch_llamacpp_aarch64.py at build time. The patches add SVE/NEON
+# fast paths to three previously-scalar (or x86-only) hot functions:
+#   - ggml_compute_forward_rms_norm_f32 (ops.cpp): sum-of-squares now via
+#     ggml_vec_dot_f32 (SVE 8x-unroll), fused y = x*scale*w loop now SVE/NEON.
+#   - ggml_cpu_fp32_to_fp16 (ggml-cpu.c): SVE svcvt_f16_f32 fast path.
+#   - ggml_cpu_fp16_to_fp32 (ggml-cpu.c): SVE svcvt_f32_f16 fast path.
+# Targets the ~15% non-sgemm tail in the post-R6 profile (60% sgemm wall is
+# untouchable without writing a custom Neoverse-N2 sgemm). Realistic gain
+# bounded by Amdahl: cutting half off the 15% tail = 7.5% overall.
+gen_llama_kopt3() {
+    local preload=
+    for cand in /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so.0 \
+                /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so; do
+        [[ -e "$cand" ]] && { preload="$cand"; break; }
+    done
+    qg_step "gen $*" env \
+        ${preload:+LD_PRELOAD="$preload"} \
+        OPENBLAS_CORETYPE=NEOVERSEN2 \
+        uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
+        "${DRY_GEN[@]}" "$@"
+    echo
+}
 # Each cell runs both templates (original, test-200) internally.
 # pytorch runs the L2 forced-prefix forward both ways: the full-sequence
 # output projection, then --last-pos-logits restricting it to the last
@@ -265,6 +311,11 @@ gen_llama_kopt --runtime llamacpp --precision f32-kopt --artifact "gguf_models/$
 # kernels with no further f32 headroom available. See gen_llama_kopt2.
 gen_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --artifact "gguf_models/$BASENAME.f32.gguf"
 gen_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --artifact "gguf_models/$BASENAME.f32.gguf" --kv-cache
+# f32 +kernel-opt round 3 — same env as kopt, gain comes from the ggml-cpu
+# C/C++-source patches applied at build time (see gen_llama_kopt3 above and
+# scripts/patch_llamacpp_aarch64.py).
+gen_llama_kopt3 --runtime llamacpp --precision f32-kopt3 --artifact "gguf_models/$BASENAME.f32.gguf"
+gen_llama_kopt3 --runtime llamacpp --precision f32-kopt3 --artifact "gguf_models/$BASENAME.f32.gguf" --kv-cache
 # q4_K_M GGUF — K-quant 4-bit, the recommended "small but accurate" path.
 # Uses ggml's K-quant matmul kernels (KleidiAI int4/int8 dispatch on aarch64).
 gen_llama --runtime llamacpp --precision q4_K_M --artifact "gguf_models/$BASENAME.q4_K_M.gguf"

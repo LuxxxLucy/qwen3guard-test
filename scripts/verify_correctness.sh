@@ -159,6 +159,13 @@ verify_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --opt-level L1 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
 verify_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --opt-level L3 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
+# +kernel-opt3 rows — same f32 GGUF, kopt env. Gain comes from the ggml-cpu
+# C/C++-source patches applied at build (scripts/patch_llamacpp_aarch64.py).
+# Reuses verify_llama_kopt (same env layering).
+verify_llama_kopt --runtime llamacpp --precision f32-kopt3 --opt-level L1 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+verify_llama_kopt --runtime llamacpp --precision f32-kopt3 --opt-level L3 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
 verify --runtime llamacpp --precision q4_K_M --opt-level L1 \
     --artifact "gguf_models/$BASENAME.q4_K_M.gguf"
 verify --runtime llamacpp --precision q4_K_M --opt-level L3 \

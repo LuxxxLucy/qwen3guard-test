@@ -38,6 +38,8 @@ ROWS: list[tuple[tuple[str, str, str], tuple[str, str]]] = [
     (("llamacpp",    "f32-kopt", "L3"), ("",                         "+L3 prefix-KV")),
     (("llamacpp",    "f32-kopt2", "L1"), ("llamacpp f32 +kernel-opt2", "L1 (L2 baked)")),
     (("llamacpp",    "f32-kopt2", "L3"), ("",                          "+L3 prefix-KV")),
+    (("llamacpp",    "f32-kopt3", "L1"), ("llamacpp f32 +kernel-opt3", "L1 (L2 baked)")),
+    (("llamacpp",    "f32-kopt3", "L3"), ("",                          "+L3 prefix-KV")),
     (("llamacpp",    "q4_K_M", "L1"), ("llamacpp q4_K_M", "L1 (L2 baked)")),
     (("llamacpp",    "q4_K_M", "L3"), ("",                "+L3 prefix-KV")),
     (("rust-candle", "fp32", "L0"), ("rust-candle fp32",  "L0")),
