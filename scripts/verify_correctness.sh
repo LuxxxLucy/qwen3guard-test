@@ -51,6 +51,27 @@ verify_llama_kopt() {
     echo
 }
 
+# verify_llama_kopt2: scope the +kernel-opt2 env (extra OpenBLAS / OpenMP
+# knobs over kopt — see scripts/run_gen_cpu.sh gen_llama_kopt2) to the
+# kernel-opt2 verify rows. Same LD_PRELOAD fallback behaviour as
+# verify_llama_kopt on hosts without libopenblas0-openmp.
+verify_llama_kopt2() {
+    local preload=
+    for cand in /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so.0 \
+                /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so; do
+        [[ -e "$cand" ]] && { preload="$cand"; break; }
+    done
+    qg_step "verify $*" env \
+        ${preload:+LD_PRELOAD="$preload"} \
+        OPENBLAS_CORETYPE=NEOVERSEN2 \
+        OPENBLAS_BLOCK_FACTOR=2 \
+        OPENBLAS_THREAD_TIMEOUT=0 \
+        OMP_PROC_BIND=spread \
+        OMP_PLACES=cores \
+        uv run python src/verify_lm_head.py --model-id "$MODEL_ID" "$@"
+    echo
+}
+
 # vLLM lives in a sibling .venv-vllm (see scripts/setup_vllm_venv.sh). Its
 # verify call must run under that interpreter, not the main uv venv.
 verify_vllm() {
@@ -132,6 +153,11 @@ verify --runtime llamacpp --precision f32  --opt-level L3 \
 verify_llama_kopt --runtime llamacpp --precision f32-kopt --opt-level L1 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
 verify_llama_kopt --runtime llamacpp --precision f32-kopt --opt-level L3 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+# +kernel-opt2 rows — same f32 GGUF, kopt env + extra OpenBLAS/OpenMP knobs.
+verify_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --opt-level L1 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+verify_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --opt-level L3 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
 verify --runtime llamacpp --precision q4_K_M --opt-level L1 \
     --artifact "gguf_models/$BASENAME.q4_K_M.gguf"

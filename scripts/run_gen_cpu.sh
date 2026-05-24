@@ -185,6 +185,37 @@ gen_llama_kopt() {
         "${DRY_GEN[@]}" "$@"
     echo
 }
+# gen_llama_kopt2: f32 +kernel-opt round 2. Same OpenBLAS-OMP + NEOVERSEN2
+# base as gen_llama_kopt, with four extra knobs layered on:
+#  - OPENBLAS_BLOCK_FACTOR=2: halves the GEBP block size; smaller A-panels
+#    fit cleaner into the 64 KB L1d on each Kunpeng core.
+#  - OMP_PROC_BIND=spread + OMP_PLACES=cores: pins the 16 OpenMP threads to
+#    16 distinct cores in spread order so libgomp does not migrate them and
+#    so two threads never share an L1d set.
+#  - OPENBLAS_THREAD_TIMEOUT=0: keeps the OpenBLAS worker threads parked
+#    across consecutive sgemm calls instead of re-spawning per call.
+# Net effect on Kunpeng 920 (24 physical cores, 16 used) is within
+# measurement noise of kopt — see plan.md "R7 wall" for the cost stack.
+# The cell exists so the table publishes the post-R6 wall measurement
+# independently of the kopt row.
+gen_llama_kopt2() {
+    local preload=
+    for cand in /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so.0 \
+                /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so; do
+        [[ -e "$cand" ]] && { preload="$cand"; break; }
+    done
+    qg_step "gen $*" env \
+        ${preload:+LD_PRELOAD="$preload"} \
+        OPENBLAS_CORETYPE=NEOVERSEN2 \
+        OPENBLAS_BLOCK_FACTOR=2 \
+        OPENBLAS_THREAD_TIMEOUT=0 \
+        OMP_PROC_BIND=spread \
+        OMP_PLACES=cores \
+        uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
+        "${DRY_GEN[@]}" "$@"
+    echo
+}
 # Each cell runs both templates (original, test-200) internally.
 # pytorch runs the L2 forced-prefix forward both ways: the full-sequence
 # output projection, then --last-pos-logits restricting it to the last
@@ -227,6 +258,13 @@ gen_llama --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAM
 # libgomp oversubscription and routing sgemm through the Neoverse-N2 kernel.
 gen_llama_kopt --runtime llamacpp --precision f32-kopt --artifact "gguf_models/$BASENAME.f32.gguf"
 gen_llama_kopt --runtime llamacpp --precision f32-kopt --artifact "gguf_models/$BASENAME.f32.gguf" --kv-cache
+# f32 +kernel-opt round 2 — adds GEBP block tuning, OMP thread pinning, and
+# OpenBLAS thread-keep-alive on top of the kopt env. Within-noise of kopt on
+# Kunpeng 920: the post-kopt cost stack is 60% sgemm_kernel_NEOVERSEN2 +
+# 10% ggml_vec_dot_f16 + 6% sgemm_incopy, all in already-tuned aarch64
+# kernels with no further f32 headroom available. See gen_llama_kopt2.
+gen_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --artifact "gguf_models/$BASENAME.f32.gguf"
+gen_llama_kopt2 --runtime llamacpp --precision f32-kopt2 --artifact "gguf_models/$BASENAME.f32.gguf" --kv-cache
 # q4_K_M GGUF — K-quant 4-bit, the recommended "small but accurate" path.
 # Uses ggml's K-quant matmul kernels (KleidiAI int4/int8 dispatch on aarch64).
 gen_llama --runtime llamacpp --precision q4_K_M --artifact "gguf_models/$BASENAME.q4_K_M.gguf"
