@@ -17,7 +17,16 @@ set -o pipefail
 source "$(dirname "$0")/lib.sh"
 qg_setup_env
 
+# --model-id accepts a HF repo id (default) or a local directory; BASENAME
+# stays as the model's short name and drives the export-artifact paths.
 MODEL_ID="Qwen/Qwen3Guard-Gen-0.6B"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model-id) MODEL_ID="$2"; shift 2 ;;
+        --model-id=*) MODEL_ID="${1#--model-id=}"; shift ;;
+        *) echo "[verify_correctness] unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
 BASENAME="$(basename "$MODEL_ID")"
 
 verify() {

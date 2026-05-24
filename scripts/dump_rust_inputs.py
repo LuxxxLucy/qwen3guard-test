@@ -34,10 +34,13 @@ def main() -> int:
     ap.add_argument("--out", default="rust/bench_inputs.json")
     args = ap.parse_args()
 
-    from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
-    model_path = snapshot_download(args.model_id, local_files_only=True)
+    if Path(args.model_id).is_dir():
+        model_path = args.model_id
+    else:
+        from huggingface_hub import snapshot_download
+        model_path = snapshot_download(args.model_id, local_files_only=True)
     tok = AutoTokenizer.from_pretrained(args.model_id)
     texts = load_representative_texts(max_samples=args.n_samples, tokenizer=tok)
     print(f"[dump] model_path={model_path}")

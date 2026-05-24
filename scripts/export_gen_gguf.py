@@ -49,8 +49,11 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     basename = Path(args.model_id).name
 
-    from huggingface_hub import snapshot_download
-    model_dir = snapshot_download(args.model_id)
+    if Path(args.model_id).is_dir():
+        model_dir = args.model_id
+    else:
+        from huggingface_hub import snapshot_download
+        model_dir = snapshot_download(args.model_id)
 
     repo_dir = ensure_llama_cpp()
     for quant in args.quants:

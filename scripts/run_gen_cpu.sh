@@ -22,19 +22,26 @@ set -o pipefail
 source "$(dirname "$0")/lib.sh"
 qg_setup_env
 
+# --model-id accepts a HF repo id (default) or a local directory. A local path
+# is useful when the HF hub is unreachable (e.g. Huawei Cloud regions where the
+# upstream LFS CDN is throttled): pre-fetch via ModelScope or rsync, then
+# `bash scripts/run_gen_cpu.sh --model-id /local/path`. The download step is
+# skipped automatically when --model-id resolves to an existing directory.
 MODEL_ID="Qwen/Qwen3Guard-Gen-0.6B"
 N_SAMPLES=100
-BASENAME="$(basename "$MODEL_ID")"
 
 DRY_RUN=
 DRY_GEN=()
 DRY_RUST=()
-for arg in "$@"; do
-    case "$arg" in
-        --dry-run) DRY_RUN=1; DRY_GEN=(--dry-run); DRY_RUST=(--dry-run) ;;
-        *) echo "[run_gen_cpu] unknown argument: $arg" >&2; exit 2 ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1; DRY_GEN=(--dry-run); DRY_RUST=(--dry-run); shift ;;
+        --model-id) MODEL_ID="$2"; shift 2 ;;
+        --model-id=*) MODEL_ID="${1#--model-id=}"; shift ;;
+        *) echo "[run_gen_cpu] unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+BASENAME="$(basename "$MODEL_ID")"
 
 # Cap at 16: this batch=1 prefill-bound workload tops out around there;
 # pinning to a higher physical-core count just adds scheduling noise.
@@ -54,15 +61,9 @@ qg_section "1/10 uv sync (llama-cpp-python built from source)"
 # fp16/fp32 prefill GEMM — Accelerate on macOS, OpenBLAS on Linux.
 if [[ "$(uname)" == "Darwin" ]]; then
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple -DGGML_NATIVE=ON"
-elif [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
-    # Linux aarch64: GGML_NATIVE=ON auto-detects flags from /proc/cpuinfo
-    # but under Apple Virtualization Framework (colima on M-series) /proc
-    # reports +fp16fml without the prerequisite +fp16. vfmaq_f16 then fails
-    # to inline. Pin the arch explicitly (matches Kunpeng 925 ARMv8.2-A +
-    # FP16 + dot product; real Kunpeng silicon and Apple Silicon are both
-    # supersets) and turn NATIVE off so the override sticks.
-    export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16+dotprod"
 else
+    # Linux: GGML_NATIVE=ON enables every ISA /proc/cpuinfo advertises — SVE +
+    # BF16 + I8MM + FP16 + dotprod on Kunpeng 920, AVX2/AVX-512 on x86_64.
     export CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=ON"
 fi
 uv cache clean llama-cpp-python
@@ -71,7 +72,12 @@ uv sync --reinstall-package llama-cpp-python \
 qg_step "uv sync" true
 
 qg_section "2/10 download weights + Qwen3GuardTest dataset"
-qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
+if [[ -d "$MODEL_ID" ]]; then
+    qg_step "download (model local, dataset only)" uv run python scripts/download.py \
+        --variants gen --sizes 0.6B --skip-model
+else
+    qg_step "download" uv run python scripts/download.py --variants gen --sizes 0.6B
+fi
 
 qg_section "3/10 export ONNX (fp32, int8, with-past)"
 qg_step "export onnx" uv run python scripts/export_gen_onnx.py \
@@ -100,13 +106,14 @@ qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
 qg_section "8/10 dump Rust benchmark inputs"
-qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py
+qg_step "dump rust inputs" uv run python scripts/dump_rust_inputs.py \
+    --model-id "$MODEL_ID"
 
 qg_section "9/10 cross-impl trick-correctness gate"
 # Per-row verify against PyTorch fp32 L0 reference. Standalone runnable via
 # `bash scripts/verify_correctness.sh`. Drift on any row records FAIL; the
 # bench section continues regardless so latency cells still populate.
-qg_step "verify (all rows)" bash scripts/verify_correctness.sh
+qg_step "verify (all rows)" bash scripts/verify_correctness.sh --model-id "$MODEL_ID"
 
 qg_section "10/10 benchmarks"
 gen() {
