@@ -309,25 +309,61 @@ class OpenVINOCPUBackend(GenBackend):
 
 class VLLMCPUBackend(GenBackend):
     """vLLM CPU — all-tricks-baked single-row baseline. Skips the trick ladder.
-    With "Safety: " forced in the prompt, the next-token argmax IS the verdict."""
+    With "Safety: " forced in the prompt the next-token argmax IS the verdict;
+    `verdict_logits` reads the 3 logits via SamplingParams(logprobs=K) so the
+    verify gate can compare against the PyTorch fp32 oracle."""
     runtime = "vllm-cpu"
+
+    # Precision mapping: vLLM's `dtype` argument. fp32 first per the bench plan;
+    # vLLM may refuse it on some kernels — the requested dtype is kept explicit
+    # so the result JSON labels the row instead of silently auto-coercing.
+    _PREC = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}
+    # Top-K logprobs requested per step. vLLM 0.13.0 caps it at 20 by default
+    # (max_logprobs in EngineCore). With "Safety: " forced, Safe / Unsafe /
+    # Controversial dominate the next-token distribution, so 20 has plenty of
+    # headroom over the 3 verdict tokens.
+    _TOPK_LOGPROBS = 20
 
     def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
         from vllm import LLM, SamplingParams
         from vllm.inputs import TokensPrompt
         self._TokensPrompt = TokensPrompt
+        dtype = self._PREC.get(self.precision, self.precision)
         self.llm = LLM(
-            model=model_id, dtype="float16", enforce_eager=True,
+            model=model_id, dtype=dtype, enforce_eager=True,
             max_model_len=max(2048, max_seq_len + 16), disable_log_stats=True,
         )
-        self._sp = SamplingParams(temperature=0.0, max_tokens=1)
+        self._sp_predict = SamplingParams(temperature=0.0, max_tokens=1)
+        self._sp_logits = SamplingParams(
+            temperature=0.0, max_tokens=1, logprobs=self._TOPK_LOGPROBS,
+        )
         import vllm
-        self.detail = f"vllm {vllm.__version__} cpu"
+        self.detail = f"vllm {vllm.__version__} cpu dtype={dtype}"
+
+    def verdict_logits(self, forced_ids: list[int]) -> list[float]:
+        """Top-K logprobs at the first generated position, projected onto the
+        3 verdict token ids. Returns raw logprobs (post-softmax log space) —
+        the verify gate only consumes argmax for vllm-cpu, so a monotonic
+        transform of the logits is fine. Missing-from-top-K is treated as -inf."""
+        out = self.llm.generate(
+            [self._TokensPrompt(prompt_token_ids=forced_ids)],
+            self._sp_logits, use_tqdm=False,
+        )
+        # vLLM CompletionOutput.logprobs is [{token_id: Logprob, ...}] per step.
+        lp_map = out[0].outputs[0].logprobs[0]
+        vals: list[float] = []
+        for tid in self.verdict_token_ids:
+            entry = lp_map.get(tid)
+            if entry is None:
+                vals.append(float("-inf"))
+            else:
+                vals.append(float(entry.logprob))
+        return vals
 
     def predict(self, forced_ids: list[int]) -> int:
         out = self.llm.generate(
             [self._TokensPrompt(prompt_token_ids=forced_ids)],
-            self._sp, use_tqdm=False,
+            self._sp_predict, use_tqdm=False,
         )
         next_id = out[0].outputs[0].token_ids[0]
         try:
@@ -444,11 +480,90 @@ class CTranslate2CPUBackend(GenBackend):
         return self._verdict_from_generated(gen_ids)
 
 
+class MNNLLMBackend(GenBackend):
+    """MNN-LLM CPU backend (Alibaba's Arm-tuned LLM runtime). Single whole-
+    runtime row; `forward(input_ids)` returns last-position logits by default
+    (L2 lastpos baked), so L1 is one forced-prefix forward + 3 verdict-slot
+    reads. L0 uses the engine's built-in `generate()`."""
+    runtime = "mnn"
+    SUPPORTS_L0 = True
+
+    def load(self, model_id: str, artifact: str | None, max_seq_len: int) -> None:
+        import numpy as np
+        import MNN.llm as mnn_llm
+        import MNN as mnn_pkg
+        from transformers import AutoTokenizer
+        if not artifact:
+            raise SystemExit("[mnn] --artifact (converted model dir) is required.")
+        adir = Path(artifact)
+        cfg = adir / "config.json"
+        if not cfg.exists():
+            raise SystemExit(
+                f"[mnn] config.json not found in {adir} "
+                f"(run scripts/export_gen_mnn.py first).")
+        self._np = np
+        # The HF tokenizer is the canonical detokenizer for the L0 decode path
+        # — MNN's `response()` returns generated text, which we then map to a
+        # verdict index via the shared extract_verdict() helper.
+        self._tok = AutoTokenizer.from_pretrained(model_id)
+        self.model = mnn_llm.create(str(cfg))
+        # Threads + precision pinned per call. precision="high" keeps fp32
+        # accumulators on the CPU backend; weights are still fp16 (the highest
+        # precision MNN-LLM's converter writes for the language path —
+        # mnn_converter.py:349 asserts 1/2/4/8 for the quantized branch).
+        # max_new_tokens caps the L0 decode budget. pymnn 3.5.0's `response()`
+        # reads it from config; `generate()` in this build is non-functional
+        # so L0 goes through response()+detokenize.
+        self.model.set_config({
+            "thread_num": self.threads or 16,
+            "precision": "high",
+            "memory": "high",
+            "max_new_tokens": L0_MAX_NEW_TOKENS,
+        })
+        self.model.load()
+        version = getattr(mnn_pkg, "version", lambda: "?")() if hasattr(mnn_pkg, "version") else "?"
+        self.detail = (f"mnn-llm {version} weights={self.precision} "
+                       f"accum=fp32 threads={self.threads or 16}")
+
+    def _logits_to_numpy(self, logits_var) -> "list[float]":
+        # MNN Var -> numpy via .read(). For default forward (all_logits=false),
+        # the shape is [1, 1, V] containing the last-position row directly.
+        np = self._np
+        arr = np.array(logits_var.read())
+        return arr.reshape(-1)
+
+    def verdict_logits(self, forced_ids: list[int]) -> list[float]:
+        # reset() clears the KV cache from any prior call; generate_init() arms
+        # a fresh prefill so seq_len_index is correct.
+        self.model.reset()
+        self.model.generate_init()
+        logits_var = self.model.forward([int(i) for i in forced_ids])
+        row = self._logits_to_numpy(logits_var)
+        return self._read_verdicts(row)
+
+    def decode_l0(self, plain_ids: list[int]) -> int:
+        # pymnn 3.5.0's `generate(input_ids)` returns an empty list in this
+        # build; `response(text, stream)` is the working decode entry point but
+        # takes detokenized text. Round-trip the prompt ids through the HF
+        # tokenizer, run response(), then parse the returned text for the
+        # verdict label — same scheme accuracy_check.py uses elsewhere.
+        from gen_common import VERDICT_LABELS, extract_verdict
+        self.model.reset()
+        self.model.generate_init()
+        prompt = self._tok.decode(plain_ids, skip_special_tokens=False)
+        out_text = self.model.response(prompt, False) or ""
+        verdict = extract_verdict(out_text)
+        try:
+            return VERDICT_LABELS.index(verdict)
+        except ValueError:
+            return -1
+
+
 _BACKENDS: dict[Runtime, type[GenBackend]] = dict(zip(
     RUNTIMES,
     (PyTorchCPUBackend, OnnxCPUBackend, OnnxGenAICPUBackend,
      OpenVINOCPUBackend, LlamaCppBackend, VLLMCPUBackend,
-     CTranslate2CPUBackend),
+     CTranslate2CPUBackend, MNNLLMBackend),
     strict=True,
 ))
 

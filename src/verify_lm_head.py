@@ -174,10 +174,6 @@ def main() -> int:
                                    else DEFAULT_PRECISION[args.runtime])
     opt_level = args.opt_level
 
-    if args.runtime == "vllm-cpu":
-        print("[verify] vllm-cpu: no verdict_logits surface; skipping.")
-        return 0
-
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model_id)
     vids = [discover_verdict_token_ids(tok, TEMPLATES[0])[v]
@@ -198,8 +194,16 @@ def main() -> int:
                                   opt_level)
 
     strict = precision == "fp32"
-    gate_desc = (f"fp32 atol={FP32_ATOL:.0e} AND argmax==n" if strict
-                 else f"argmax/n>={QUANT_ARGMAX_FRAC:.0%}")
+    # vLLM exposes top-K logprobs, not raw logits — log-softmax is monotone in
+    # the logits so argmax matches the oracle, but the absolute values diverge
+    # by the per-position log-partition term. Gate vllm-cpu on argmax only.
+    argmax_only = args.runtime == "vllm-cpu"
+    if argmax_only:
+        gate_desc = "argmax==n (vllm-cpu exposes logprobs, not logits)"
+    elif strict:
+        gate_desc = f"fp32 atol={FP32_ATOL:.0e} AND argmax==n"
+    else:
+        gate_desc = f"argmax/n>={QUANT_ARGMAX_FRAC:.0%}"
     print(f"[verify] {args.runtime}/{precision} {opt_level} "
           f"n={N_SAMPLES} gate: {gate_desc}", flush=True)
 
@@ -212,7 +216,9 @@ def main() -> int:
         max_diff, argmax_match = compare(got_verdicts, got_logits,
                                          ref_logits, ref_verdicts)
         n = len(got_verdicts)
-        if strict:
+        if argmax_only:
+            ok = argmax_match == n
+        elif strict:
             ok = argmax_match == n and (max_diff is None or max_diff <= FP32_ATOL)
         else:
             ok = argmax_match >= QUANT_ARGMAX_FRAC * n

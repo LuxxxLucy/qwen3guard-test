@@ -34,6 +34,30 @@ verify() {
     echo
 }
 
+# vLLM lives in a sibling .venv-vllm (see scripts/setup_vllm_venv.sh). Its
+# verify call must run under that interpreter, not the main uv venv.
+verify_vllm() {
+    if [[ ! -x .venv-vllm/bin/python ]]; then
+        echo "[skip] verify vllm-cpu: .venv-vllm not built (run scripts/setup_vllm_venv.sh)."
+        return 0
+    fi
+    if ! .venv-vllm/bin/python -c "import vllm" 2>/dev/null; then
+        echo "[skip] verify vllm-cpu: import vllm failed in .venv-vllm."
+        return 0
+    fi
+    local threads
+    threads="$(qg_detect_threads)"
+    [[ "$threads" -gt 16 ]] && threads=16
+    local tcmalloc
+    tcmalloc="$(find /usr -name 'libtcmalloc_minimal.so.4' 2>/dev/null | head -1)"
+    qg_step "verify $*" env \
+        VLLM_CPU_OMP_THREADS_BIND="0-$((threads-1))" \
+        ${tcmalloc:+LD_PRELOAD="$tcmalloc"} \
+        PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}" PYTHONUNBUFFERED=1 \
+        .venv-vllm/bin/python src/verify_lm_head.py --model-id "$MODEL_ID" "$@"
+    echo
+}
+
 qg_section "cross-impl correctness gate (every row vs PyTorch fp32 L0)"
 
 # pytorch fp32 -- L0 (model-card), L1 (forced-prefix), L2 (lastpos lm_head)
@@ -91,6 +115,23 @@ verify --runtime llamacpp --precision q4_K_M --opt-level L1 \
     --artifact "gguf_models/$BASENAME.q4_K_M.gguf"
 verify --runtime llamacpp --precision q4_K_M --opt-level L3 \
     --artifact "gguf_models/$BASENAME.q4_K_M.gguf"
+
+# mnn-llm -- fp16 weights (MNN-LLM has no fp32 weight path), runtime
+# precision="high" so accumulators stay fp32. Tripwire gate (fp16 weights are
+# expected to drift logits by O(1) on borderline samples).
+if uv run python -c "import MNN.llm" 2>/dev/null \
+   && [[ -d "mnn_models/$BASENAME-fp16" ]]; then
+    verify --runtime mnn --precision fp16 --opt-level L0 \
+        --artifact "mnn_models/$BASENAME-fp16"
+    verify --runtime mnn --precision fp16 --opt-level L1 \
+        --artifact "mnn_models/$BASENAME-fp16"
+else
+    echo "[skip] mnn verify (MNN.llm not importable or model dir missing)."
+fi
+
+# vllm-cpu -- L1 (forced-prefix). vLLM exposes top-K logprobs (monotone in the
+# raw logits) rather than the raw lm_head row, so the gate is argmax-only.
+verify_vllm --runtime vllm-cpu --precision fp32 --opt-level L1
 
 # rust-candle -- dump L0/L1/L3 once, verify each from the same JSON.
 qg_step "rust verify dump" rust/target/release/qwen3guard-bench \

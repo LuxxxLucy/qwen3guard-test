@@ -40,6 +40,8 @@ ROWS: list[tuple[tuple[str, str, str], tuple[str, str]]] = [
     (("rust-candle", "fp32", "L1"), ("",                  "+L1 forced-prefix")),
     (("rust-candle", "fp32", "L3"), ("",                  "+L3 prefix-KV")),
     (("ctranslate2", "fp32", "L1"), ("ctranslate2 fp32",  "L1 (L2 baked)")),
+    (("mnn",         "fp16", "L0"), ("mnn-llm fp16",      "L0 (L2 baked)")),
+    (("mnn",         "fp16", "L1"), ("",                  "+L1 (L2 baked)")),
     (("vllm-cpu",    "fp16", "L1"), ("vllm cpu fp16",     "default (all baked)")),
 ]
 

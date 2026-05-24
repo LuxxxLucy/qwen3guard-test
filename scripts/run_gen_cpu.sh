@@ -102,6 +102,23 @@ qg_section "6b/10 export CTranslate2 (fp32)"
 qg_step "export ctranslate2" uv run python scripts/export_gen_ctranslate2.py \
     --model-id "$MODEL_ID" --precisions fp32
 
+qg_section "6c/10 export MNN-LLM (fp16)"
+# MNN-LLM's converter needs the alibaba/MNN source tree (transformers/llm/export
+# /llmexport.py). $MNN_HOME points at a local clone. MNN tops out at fp16
+# weights for the language path (1/2/4/8-bit otherwise) — there is no fp32
+# weight export. precision="high" at runtime keeps accumulators in fp32.
+# Skipped if pymnn isn't installed or $MNN_HOME isn't set.
+if uv run python -c "import MNN.llm" 2>/dev/null; then
+    if [[ -n "${MNN_HOME:-}" && -d "$MNN_HOME" ]]; then
+        qg_step "export mnn" uv run python scripts/export_gen_mnn.py \
+            --model-id "$MODEL_ID" --precisions fp16 --mnn-home "$MNN_HOME"
+    else
+        echo "[skip] MNN_HOME not set or not a directory; skipping MNN export."
+    fi
+else
+    echo "[skip] MNN.llm not importable on this host (pymnn not installed)."
+fi
+
 qg_section "7/10 build Rust candle backend"
 qg_step "cargo build" bash -c "cd rust && cargo build --release"
 
@@ -186,14 +203,41 @@ echo
 # last-position slice gives L2 baked + L1 forced-prefix).
 gen --runtime ctranslate2 --precision fp32 --artifact "ct2_models/$BASENAME-fp32"
 
+# MNN-LLM CPU: Alibaba's Arm-tuned LLM runtime. `forward(input_ids)` returns
+# last-position logits by default (L2 lastpos baked); L1 is one forced-prefix
+# forward. fp16 weights + precision="high" (fp32 accumulators) is the
+# highest-precision MNN-LLM path. Skipped when pymnn isn't installed or the
+# converted model dir is missing.
+if uv run python -c "import MNN.llm" 2>/dev/null \
+   && [[ -d "mnn_models/$BASENAME-fp16" ]]; then
+    gen --runtime mnn --precision fp16 --artifact "mnn_models/$BASENAME-fp16"
+    gen --runtime mnn --precision fp16 --artifact "mnn_models/$BASENAME-fp16" --unoptimized
+else
+    echo "[skip] mnn (MNN.llm not importable or model dir missing)."
+fi
+
 # vLLM CPU: single-row baseline, no trick ladder. vLLM bakes its own paged
 # attention, KV management, and last-position sampling. The Qwen3-supporting
-# vLLM releases (>=0.10) require torch>=2.7 — currently only on Linux x86/arm64
-# wheels — so this is skipped on Mac and gets enabled on Kunpeng.
-if uv run python -c "import vllm" 2>/dev/null; then
-    gen --runtime vllm-cpu --precision fp16
+# vLLM releases require torch>=2.7; the main .venv pins torch<2.7 for the
+# GPU box's CUDA-driver compat. vLLM therefore lives in a sibling .venv-vllm/
+# (bootstrap with scripts/setup_vllm_venv.sh on Kunpeng aarch64). The bench
+# script is invoked directly via that interpreter, bypassing `uv run`.
+VLLM_PY=".venv-vllm/bin/python"
+if [[ -x "$VLLM_PY" ]] && "$VLLM_PY" -c "import vllm" 2>/dev/null; then
+    # vLLM's CPU dispatcher honours VLLM_CPU_OMP_THREADS_BIND; pin to the same
+    # physical-core budget the other backends use. tcmalloc reduces allocator
+    # pressure for vLLM's eager-mode dispatch; LD_PRELOAD it when present.
+    VLLM_TCMALLOC="$(find /usr -name 'libtcmalloc_minimal.so.4' 2>/dev/null | head -1)"
+    qg_step "gen vllm-cpu fp32" env \
+        VLLM_CPU_OMP_THREADS_BIND="0-$((THREADS-1))" \
+        ${VLLM_TCMALLOC:+LD_PRELOAD="$VLLM_TCMALLOC"} \
+        PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}" PYTHONUNBUFFERED=1 \
+        "$VLLM_PY" src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
+        "${DRY_GEN[@]}" --runtime vllm-cpu --precision fp32
+    echo
 else
-    echo "[skip] vllm not importable on this host (Qwen3 needs vllm>=0.10, which needs torch>=2.7; install separately for Kunpeng)."
+    echo "[skip] vllm not installed in .venv-vllm (Qwen3 needs vllm>=0.10 / torch>=2.7; bootstrap with scripts/setup_vllm_venv.sh on Kunpeng aarch64)."
 fi
 
 qg_section "step ledger"

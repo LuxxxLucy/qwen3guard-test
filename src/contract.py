@@ -27,10 +27,10 @@ OPT_LEVELS: tuple[OptLevel, ...] = ("L0", "L1", "L2", "L3")
 
 # --- runtimes --------------------------------------------------------------
 Runtime = Literal["pytorch", "onnx", "onnx-genai", "openvino", "llamacpp",
-                  "vllm-cpu", "ctranslate2"]
+                  "vllm-cpu", "ctranslate2", "mnn"]
 RUNTIMES: tuple[Runtime, ...] = (
     "pytorch", "onnx", "onnx-genai", "openvino", "llamacpp", "vllm-cpu",
-    "ctranslate2",
+    "ctranslate2", "mnn",
 )
 
 DEFAULT_PRECISION: dict[Runtime, str] = {
@@ -39,8 +39,14 @@ DEFAULT_PRECISION: dict[Runtime, str] = {
     "onnx-genai":  "fp32",
     "openvino":    "fp16",
     "llamacpp":    "f16",
-    "vllm-cpu":    "fp16",
+    "vllm-cpu":    "fp32",
     "ctranslate2": "fp32",
+    # MNN-LLM's `llmexport.py` only supports fp16 (`quant_bit=16`) or 1/2/4/8-bit
+    # weight quant; the assertion at mnn_converter.py:349 rejects 32-bit. So the
+    # fp16-weight row is the highest-precision MNN cell we can produce. Runtime
+    # precision is still set to "high" (precision="high" -> Precision_High in the
+    # MNN backend config) so accumulators stay fp32.
+    "mnn":         "fp16",
 }
 
 PROVIDER_TAG: dict[Runtime, str] = {
@@ -51,6 +57,7 @@ PROVIDER_TAG: dict[Runtime, str] = {
     "llamacpp":    "llama.cpp-cpu",
     "vllm-cpu":    "vllm-cpu",
     "ctranslate2": "ctranslate2-cpu",
+    "mnn":         "mnn-llm-cpu",
 }
 
 # --- templates -------------------------------------------------------------
