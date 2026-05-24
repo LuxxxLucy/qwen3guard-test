@@ -1,28 +1,41 @@
 # Qwen3Guard-Gen CPU benchmark
 
-| backend          | variant             | original        | test-200        |
-| ---------------- | ------------------- | --------------- | --------------- |
-| pytorch fp32     | L0                  | 1764.5 / 2310.9 | 724.3 / 928.6   |
-|                  | +L1 forced-prefix   | 781.6 / 1660.4  | 506.8 / 633.3   |
-|                  | +L2 lastpos         | 773.2 / 941.5   | 434.2 / 527.5   |
-| onnx fp32        | L0 (L2 baked)       | 3070.3 / 3520.7 | 6595.7 / 9510.5 |
-|                  | +L1 (L2 baked)      | 901.2 / 1145.0  | 470.5 / 734.9   |
-|                  | +L3 prefix-KV       | 527.1 / 647.4   | 285.2 / 349.3   |
-| onnx int8        | L1 (L2 baked)       | 677.1 / 823.1   | 288.1 / 351.6   |
-| onnx-genai fp32  | L0 (L2 baked)       | 4254.3 / 7256.1 | 2240.0 / 3146.6 |
-|                  | +L1 (L2 baked)      | 3214.2 / 4359.1 | 1715.9 / 2750.1 |
-| openvino fp16    | L0 (L2 baked)       | 5156.5 / 6613.4 | 2689.5 / 5742.5 |
-|                  | +L1 (L2 baked)      | 4458.3 / 7004.4 | 2342.8 / 3297.1 |
-| openvino int8    | L1 (L2 baked)       | 4384.6 / 6737.4 | 2265.0 / 4263.3 |
-| llamacpp q8_0    | L0 (L2 baked)       | 4367.1 / 5758.6 | 2588.1 / 3710.5 |
-|                  | +L1 (L2 baked)      | 2964.6 / 4505.5 | 1537.7 / 2617.6 |
-|                  | +L3 prefix-KV       | 1509.2 / 2658.8 | 771.8 / 1312.6  |
-| llamacpp f16     | L1 (L2 baked)       | 711.7 / 926.1   | 401.7 / 592.6   |
-|                  | +L3 prefix-KV       | 522.2 / 687.1   | 297.8 / 390.2   |
-| rust-candle fp32 | L0                  | 1505.1 / 1505.1 | 958.1 / 958.1   |
-|                  | +L1 forced-prefix   | 2068.6 / 2415.7 | 1307.9 / 2251.3 |
-|                  | +L3 prefix-KV       | 1140.4 / 1376.8 | 847.2 / 975.7   |
-| vllm cpu fp16    | default (all baked) | -               | -               |
+| backend                   | variant             | original          | test-200        |
+| ------------------------- | ------------------- | ----------------- | --------------- |
+| pytorch fp32              | L0                  | 2092.7 / 2754.2   | 894.8 / 1256.9  |
+|                           | +L1 forced-prefix   | 678.1 / 701.8     | 419.1 / 428.1   |
+|                           | +L2 lastpos         | 555.3 / 613.7     | 352.9 / 362.0   |
+| onnx fp32                 | L0 (L2 baked)       | 1572.6 / 1603.6   | 1206.7 / 1221.7 |
+|                           | +L1 (L2 baked)      | 483.6 / 502.9     | 255.3 / 267.6   |
+|                           | +L3 prefix-KV       | 247.8 / 261.2     | 146.9 / 160.1   |
+| onnx int8                 | L1 (L2 baked)       | 279.1 / 284.4     | 155.7 / 162.0   |
+| onnx-genai fp32           | L0 (L2 baked)       | -                 | -               |
+|                           | +L1 (L2 baked)      | -                 | -               |
+| openvino fp16             | L0 (L2 baked)       | -                 | -               |
+|                           | +L1 (L2 baked)      | -                 | -               |
+| openvino int8             | L1 (L2 baked)       | -                 | -               |
+| llamacpp q8_0             | L0 (L2 baked)       | 643.5 / 657.0     | 432.3 / 437.6   |
+|                           | +L1 (L2 baked)      | 260.4 / 273.3     | 110.1 / 113.7   |
+|                           | +L3 prefix-KV       | 133.9 / 139.2     | 71.9 / 76.3     |
+| llamacpp f16              | L1 (L2 baked)       | 905.4 / 934.1     | 614.0 / 648.0   |
+|                           | +L3 prefix-KV       | 645.5 / 688.3     | 539.3 / 572.8   |
+| llamacpp f32              | L1 (L2 baked)       | 732.3 / 750.7     | 426.5 / 468.7   |
+|                           | +L3 prefix-KV       | 441.6 / 452.9     | 323.0 / 408.8   |
+| llamacpp f32 +kernel-opt  | L1 (L2 baked)       | 510.1 / 521.3     | 237.8 / 246.1   |
+|                           | +L3 prefix-KV       | 241.4 / 249.4     | 147.3 / 155.9   |
+| llamacpp f32 +kernel-opt2 | L1 (L2 baked)       | 10089.6 / 10245.7 | 5158.0 / 5318.4 |
+|                           | +L3 prefix-KV       | 4806.7 / 5015.7   | 3218.3 / 3525.5 |
+| llamacpp f32 +kernel-opt3 | L1 (L2 baked)       | 504.4 / 516.1     | 234.4 / 242.9   |
+|                           | +L3 prefix-KV       | 239.7 / 246.4     | 148.9 / 157.5   |
+| llamacpp q4_K_M           | L1 (L2 baked)       | -                 | -               |
+|                           | +L3 prefix-KV       | -                 | -               |
+| rust-candle fp32          | L0                  | 6156.1 / 6239.5   | 5217.1 / 5295.7 |
+|                           | +L1 forced-prefix   | 1272.2 / 1347.1   | 536.4 / 553.6   |
+|                           | +L3 prefix-KV       | 736.9 / 778.3     | 377.9 / 392.6   |
+| ctranslate2 fp32          | L1 (L2 baked)       | 1719.8 / 1780.4   | 972.2 / 977.8   |
+| mnn-llm fp16              | L0 (L2 baked)       | 1324.8 / 1370.5   | 1040.1 / 1095.8 |
+|                           | +L1 (L2 baked)      | 563.0 / 566.8     | 287.1 / 297.2   |
+| vllm-cpu fp32             | default (all baked) | 204.3 / 210.6     | 153.6 / 158.5   |
 
 Each cell is `p50 / p99` latency in milliseconds. Every method runs 5 warmup calls then 100 timed iterations. Latency is per-call wall-clock time at batch size 1; threads are pinned to the host's physical core count.
 
