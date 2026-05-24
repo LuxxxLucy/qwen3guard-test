@@ -34,6 +34,23 @@ verify() {
     echo
 }
 
+# verify_llama_kopt: scope the +kernel-opt env (OpenMP OpenBLAS via LD_PRELOAD,
+# Neoverse-N2 sgemm kernel) to the kernel-opt verify rows only. See
+# scripts/run_gen_cpu.sh gen_llama_kopt for the rationale. LD_PRELOAD silently
+# skips on hosts without libopenblas0-openmp installed.
+verify_llama_kopt() {
+    local preload=
+    for cand in /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so.0 \
+                /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so; do
+        [[ -e "$cand" ]] && { preload="$cand"; break; }
+    done
+    qg_step "verify $*" env \
+        ${preload:+LD_PRELOAD="$preload"} \
+        OPENBLAS_CORETYPE=NEOVERSEN2 \
+        uv run python src/verify_lm_head.py --model-id "$MODEL_ID" "$@"
+    echo
+}
+
 # vLLM lives in a sibling .venv-vllm (see scripts/setup_vllm_venv.sh). Its
 # verify call must run under that interpreter, not the main uv venv.
 verify_vllm() {
@@ -110,6 +127,11 @@ verify --runtime llamacpp --precision f16  --opt-level L3 \
 verify --runtime llamacpp --precision f32  --opt-level L1 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
 verify --runtime llamacpp --precision f32  --opt-level L3 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+# +kernel-opt rows — same f32 GGUF, scoped LD_PRELOAD + NEOVERSEN2 sgemm.
+verify_llama_kopt --runtime llamacpp --precision f32-kopt --opt-level L1 \
+    --artifact "gguf_models/$BASENAME.f32.gguf"
+verify_llama_kopt --runtime llamacpp --precision f32-kopt --opt-level L3 \
     --artifact "gguf_models/$BASENAME.f32.gguf"
 verify --runtime llamacpp --precision q4_K_M --opt-level L1 \
     --artifact "gguf_models/$BASENAME.q4_K_M.gguf"

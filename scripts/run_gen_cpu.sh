@@ -152,6 +152,39 @@ gen_llama() {
         "${DRY_GEN[@]}" "$@"
     echo
 }
+# gen_llama_kopt: f32 +kernel-opt cell. Two layered swaps over gen_llama:
+#  1. LD_PRELOAD the OpenMP variant of system OpenBLAS (libopenblas0-openmp).
+#     The default Ubuntu package ships a pthread-built OpenBLAS; llama.cpp's
+#     libggml-cpu.so already links libgomp.so for ggml's own intra-op
+#     parallelism. Two thread pools (pthread + OpenMP) each claim N threads
+#     and oversubscribe the cores — perf shows ~30% of wall time inside
+#     do_sched_yield / arch_local_irq_enable from the pthread spin-wait.
+#     The OpenMP variant routes OpenBLAS through the same libgomp pool ggml
+#     already runs, collapsing the two pools into one and erasing the
+#     yield storm.
+#  2. OPENBLAS_CORETYPE=NEOVERSEN2 selects OpenBLAS's Neoverse-N2 sgemm
+#     kernel (SVE + I8MM tuned) over the default armv8sve dispatch. Kunpeng
+#     920 part 0xd02 (TaiShan v110, A76-class with SVE/I8MM) closely matches
+#     the N2 microarch; the N2 path is ~9% faster than ARMV8 alone on this
+#     prefill.
+# Scoped per-cell so the existing `llamacpp f32` rows still use the default
+# OpenBLAS-pthread + ARMV8 path (regression baseline preserved). On macOS /
+# any host without the OpenMP OpenBLAS, LD_PRELOAD silently skips and the
+# cell falls back to the same path as gen_llama.
+gen_llama_kopt() {
+    local preload=
+    for cand in /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so.0 \
+                /usr/lib/aarch64-linux-gnu/openblas-openmp/libopenblas.so; do
+        [[ -e "$cand" ]] && { preload="$cand"; break; }
+    done
+    qg_step "gen $*" env \
+        ${preload:+LD_PRELOAD="$preload"} \
+        OPENBLAS_CORETYPE=NEOVERSEN2 \
+        uv run python src/bench_gen_cpu.py --model-id "$MODEL_ID" \
+        --n-samples "$N_SAMPLES" --threads "$THREADS" \
+        "${DRY_GEN[@]}" "$@"
+    echo
+}
 # Each cell runs both templates (original, test-200) internally.
 # pytorch runs the L2 forced-prefix forward both ways: the full-sequence
 # output projection, then --last-pos-logits restricting it to the last
@@ -189,6 +222,11 @@ gen_llama --runtime llamacpp --precision f16    --artifact "gguf_models/$BASENAM
 # precision ladder against pytorch/onnx fp32.
 gen_llama --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"
 gen_llama --runtime llamacpp --precision f32    --artifact "gguf_models/$BASENAME.f32.gguf"    --kv-cache
+# f32 +kernel-opt — same f32 GGUF, kernel-level swap (see gen_llama_kopt).
+# Closes the gap vs ONNX Runtime fp32 by removing the OpenBLAS-pthread /
+# libgomp oversubscription and routing sgemm through the Neoverse-N2 kernel.
+gen_llama_kopt --runtime llamacpp --precision f32-kopt --artifact "gguf_models/$BASENAME.f32.gguf"
+gen_llama_kopt --runtime llamacpp --precision f32-kopt --artifact "gguf_models/$BASENAME.f32.gguf" --kv-cache
 # q4_K_M GGUF — K-quant 4-bit, the recommended "small but accurate" path.
 # Uses ggml's K-quant matmul kernels (KleidiAI int4/int8 dispatch on aarch64).
 gen_llama --runtime llamacpp --precision q4_K_M --artifact "gguf_models/$BASENAME.q4_K_M.gguf"

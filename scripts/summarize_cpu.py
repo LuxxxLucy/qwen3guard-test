@@ -34,6 +34,8 @@ ROWS: list[tuple[tuple[str, str, str], tuple[str, str]]] = [
     (("llamacpp",    "f16",  "L3"), ("",                  "+L3 prefix-KV")),
     (("llamacpp",    "f32",  "L1"), ("llamacpp f32",      "L1 (L2 baked)")),
     (("llamacpp",    "f32",  "L3"), ("",                  "+L3 prefix-KV")),
+    (("llamacpp",    "f32-kopt", "L1"), ("llamacpp f32 +kernel-opt", "L1 (L2 baked)")),
+    (("llamacpp",    "f32-kopt", "L3"), ("",                         "+L3 prefix-KV")),
     (("llamacpp",    "q4_K_M", "L1"), ("llamacpp q4_K_M", "L1 (L2 baked)")),
     (("llamacpp",    "q4_K_M", "L3"), ("",                "+L3 prefix-KV")),
     (("rust-candle", "fp32", "L0"), ("rust-candle fp32",  "L0")),
@@ -42,7 +44,7 @@ ROWS: list[tuple[tuple[str, str, str], tuple[str, str]]] = [
     (("ctranslate2", "fp32", "L1"), ("ctranslate2 fp32",  "L1 (L2 baked)")),
     (("mnn",         "fp16", "L0"), ("mnn-llm fp16",      "L0 (L2 baked)")),
     (("mnn",         "fp16", "L1"), ("",                  "+L1 (L2 baked)")),
-    (("vllm-cpu",    "fp16", "L1"), ("vllm cpu fp16",     "default (all baked)")),
+    (("vllm-cpu",    "fp32", "L1"), ("vllm-cpu fp32",     "default (all baked)")),
 ]
 
 assert all(r in set(RUNTIMES) | {"rust-candle"} and o in OPT_LEVELS
