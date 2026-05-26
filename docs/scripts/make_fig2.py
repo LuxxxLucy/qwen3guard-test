@@ -1,9 +1,9 @@
 """Figure 2: optimized P99 latency across 0.6B / 4B / 8B.
 
 Run:
-  uv run --with matplotlib python scripts/make_fig2.py
+  uv run --with matplotlib python docs/scripts/make_fig2.py
 
-Output: figures/fig2_sizes_optimized.png
+Output: docs/figures/fig2_sizes_optimized.png
 """
 from __future__ import annotations
 from pathlib import Path

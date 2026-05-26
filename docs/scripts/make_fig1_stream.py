@@ -5,9 +5,9 @@ Shows the per-token P99 on 0.6B across input lengths for four paths:
   - Direct model.forward(...) with DynamicCache (k=1, k=8, k=16).
 
 Run:
-  uv run --with matplotlib python scripts/make_fig1_stream.py
+  uv run --with matplotlib python docs/scripts/make_fig1_stream.py
 
-Output: figures/fig1_stream_sizes.png
+Output: docs/figures/fig1_stream_sizes.png
 """
 from __future__ import annotations
 from pathlib import Path

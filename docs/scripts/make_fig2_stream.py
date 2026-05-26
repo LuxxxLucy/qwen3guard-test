@@ -4,9 +4,9 @@ The headline "T2 is met at k=16 across all sizes and lengths" figure.
 All six lengths × three sizes stay under the 3 ms T2 target.
 
 Run:
-  uv run --with matplotlib python scripts/make_fig2_stream.py
+  uv run --with matplotlib python docs/scripts/make_fig2_stream.py
 
-Output: figures/fig2_stream_length_0.6b.png
+Output: docs/figures/fig2_stream_length_0.6b.png
 """
 from __future__ import annotations
 from pathlib import Path

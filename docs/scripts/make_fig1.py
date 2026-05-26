@@ -1,9 +1,9 @@
 """Generate Figure 1: Qwen3Guard-Gen-0.6B PyTorch default vs optimized P99 latency.
 
 Run:
-  uv run --with matplotlib python scripts/make_fig1.py
+  uv run --with matplotlib python docs/scripts/make_fig1.py
 
-Output: figures/fig1_latency_0.6b.png
+Output: docs/figures/fig1_latency_0.6b.png
 """
 from __future__ import annotations
 from pathlib import Path

@@ -1,98 +1,44 @@
 # qwen3guard-test
 
-Batch=1 latency benchmarks for [Qwen3Guard](https://arxiv.org/abs/2510.14276) on **Linux + CUDA** — both the **generative classifier** (`Gen`) and the **token-stream classifier** (`Stream`), under **PyTorch** and **ONNX Runtime**.
+Batch=1 CPU latency benchmark for [Qwen3Guard-Gen-0.6B](https://arxiv.org/abs/2510.14276) across nine inference backends, with a cross-backend correctness gate.
 
-## What it measures
+## What it does
 
-| Variant  | Runtime   | Regime                              | Metric                  |
-|----------|-----------|-------------------------------------|-------------------------|
-| Gen      | PyTorch   | full `apply_chat_template → generate → decode` | per-request latency (P50/P95/P99) |
-| Gen      | ONNX RT   | same, via `optimum.onnxruntime`     | per-request latency     |
-| Stream   | PyTorch   | prefill (user prompt) + per-token (assistant stream) | prefill latency + per-token latency |
-| Stream   | ONNX RT   | *not yet supported — see `scripts/export_stream_onnx.py`* | — |
+Measures per-call latency (p50 / p99) for one safety-classification verdict at batch size 1, across two input templates (`original` ≈ 371 tokens; `test-200` = 200 tokens).
+100 timed iterations per cell, 5 warmups.
 
-Input modes:
-- **Representative** (default): samples near the median token length from `Qwen/Qwen3GuardTest`.
-- **Length sweep** (`--lengths 32 64 128 … 16384`): synthetic fixed-length prompts — latency-vs-length curve.
+Backends: **PyTorch**, **ONNX Runtime** (fp32 + int8), **llama.cpp** (f32 + f32-kopt + f16 + q8_0), **CTranslate2** (fp32), **MNN-LLM** (fp16), **vLLM-CPU** (fp32), **Rust candle** (fp32).
 
-PyTorch device: CUDA (bf16). ONNX Runtime provider: `CUDAExecutionProvider` if available, else `CPUExecutionProvider`.
+Cumulative optimization ladder:
 
-## Quickstart
+| Level | Trick |
+|---|---|
+| L0 | unoptimized — `tokenize → generate(max_new=32) → parse verdict` |
+| L1 | + forced-prefix — teacher-force `"Safety: "`, one forward, read 3 verdict logits |
+| L2 | + lastpos lm_head — slice hidden state to last position before the vocab projection |
+| L3 | + prefix KV cache — precompute the shared system-prompt KV once |
 
-```bash
-uv sync                                # install deps (torch cu12 + onnxruntime-gpu)
-uv run python scripts/download.py      # pre-fetch 0.6B models + dataset
-bash scripts/run_all.sh                # run the uncommented combos
-# → results/bench_*_<timestamp>.json
-```
-
-### Larger models
-
-```bash
-uv run python scripts/download.py --sizes 0.6B 4B 8B
-# then edit scripts/run_all.sh to uncomment the 4B / 8B lines
-```
-
-### Length sweeps
-
-Edit `scripts/run_all.sh`: uncomment the block under "Length-sweep mode". Default lengths are `32 64 128 256 512 1024 2048 4096 8192 16384` — change `LENGTHS` to taste. Each length emits its own JSON result file.
+After a full run, the method × template comparison lands as `var/results/REPORT_CPU_GEN_AUTO.md`, with per-cell JSONs under `var/results/`.
 
 ## Layout
 
 ```
-qwen3guard-test/
-├── pyproject.toml           # uv-managed project
-├── docs/                    # self-contained reports
-│   ├── REPORT.md            # index
-│   ├── REPORT_GEN.md        # Gen-variant findings
-│   └── REPORT_STREAM.md     # Stream-variant findings
-├── scripts/
-│   ├── run_all.sh           # main runner — one line per combo
-│   ├── run_optim_ladder_gen.sh
-│   ├── run_optim_ladder_stream.sh
-│   ├── download.py          # pre-fetch weights + dataset
-│   ├── correctness_test.py  # L0 vs L2 verdict equivalence
-│   ├── accuracy_check.py    # labeled-data accuracy probe
-│   ├── export_gen_onnx.py   # Gen → ONNX via optimum
-│   ├── export_stream_onnx.py  # stub; see comment
-│   └── make_fig{1,2}{,_stream}.py  # figure generators
-├── src/
-│   ├── bench_common.py      # device, sample pools, latency stats
-│   ├── bench_gen_pytorch.py
-│   ├── bench_gen_onnx.py
-│   ├── bench_stream_pytorch.py          # shipped-API path
-│   ├── bench_stream_chunked.py          # chunked ingest
-│   ├── bench_stream_direct.py           # bypass shipped API
-│   ├── bench_stream_direct_heads.py     # causality proof
-│   ├── bench_stream_direct_length_sweep.py
-│   └── profile_stream.py
-├── figures/                 # PNGs embedded by reports
-└── results/                 # JSON output (gitignored)
+scripts/      entry points + shell helpers
+src/          bench drivers, backends/, exporters/
+docs/         self-contained reports + figures
+var/          runtime state (gitignored): models/, results/, logs/, vendor/
 ```
 
-## Output schema
+## Run
 
-Each run writes one JSON file:
-
-```json
-{
-  "variant": "gen",                "runtime": "pytorch",
-  "model_id": "Qwen/Qwen3Guard-Gen-0.6B",
-  "device": "cuda",                "dtype": "bfloat16",
-  "provider": null,                "n_samples": 100,
-  "n_warmup": 5,
-  "input_token_count_median": 42,  "output_token_count": 32,
-  "latency": { "p50_ms": ..., "p95_ms": ..., "p99_ms": ..., "mean_ms": ..., "throughput_rps": ... },
-  "extra": { "mode": "representative", "target_input_tokens": null },
-  "timestamp_utc": "...", "host": "...", "torch_version": "..."
-}
+```bash
+bash scripts/run_gen_cpu.sh --dry-run   # smoke test — exports + correctness gate + tiny bench
+bash scripts/run_gen_cpu.sh             # full results
 ```
 
-Stream results additionally include `extra.per_token` with the same latency struct for the per-token regime.
+## Misc
 
-## Notes
-
-- Qwen3Guard-Gen output is short (`Safety: X\nCategories: Y\nRefusal: Z`), so `max_new_tokens=32` is the default.
-- Stream-ONNX export is deferred — the stateful `stream_moderate_from_ids` API and two classification heads require a custom wrapper. See `scripts/export_stream_onnx.py`.
-- Reports live in `docs/` (`REPORT.md` is the index; Gen and Stream each have their own self-contained write-up).
-- Gen-ONNX is currently exported without past-KV cache because optimum's dummy KV generator picks the wrong head-dim for Qwen3 (`head_dim=128` vs `hidden/heads=64`). ONNX numbers are therefore O(N²) per generated token; treat as a CPU/EP floor until the KV-cache export is fixed.
+- vLLM lives in a separate venv (its `torch` pin conflicts with the main one): `bash scripts/setup_vllm_venv.sh` (once).
+- `pymnn` is not in `pyproject.toml` (no reliable aarch64 wheel cadence). Install separately if the MNN-LLM row is wanted: `uv pip install MNN`. The bench cell auto-skips otherwise.
+- Correctness gate only (skips exports and bench cells): `bash scripts/verify_correctness.sh`.
+- Regenerate the auto-table from existing JSONs without re-running: `uv run python scripts/summarize_cpu.py` (writes `var/results/REPORT_CPU_GEN_AUTO.md`).

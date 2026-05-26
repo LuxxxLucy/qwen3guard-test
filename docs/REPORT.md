@@ -13,5 +13,4 @@ enough structurally to each warrant their own report.
   baseline, the direct-path bypass, and the long-context × chunk-size
   sweep.
 
-Source, raw results, and reproducibility scripts:
-`src/`, `results/`, `scripts/run_optim_ladder_gen.sh`, `scripts/run_optim_ladder_stream.sh`.
+Source code lives in `src/`. The CPU benchmark companion to REPORT_GEN.md is driven by `scripts/run_gen_cpu.sh`; results land under `var/`.
