@@ -50,13 +50,16 @@ def main() -> int:
     ap.add_argument("--variants", nargs="+", default=["gen", "stream"],
                     choices=["gen", "stream"])
     ap.add_argument("--skip-dataset", action="store_true")
+    ap.add_argument("--skip-model", action="store_true",
+                    help="Skip the model fetch (weights already present).")
     args = ap.parse_args()
 
-    for size in args.sizes:
-        if "gen" in args.variants:
-            fetch_model(GEN_IDS[size])
-        if "stream" in args.variants:
-            fetch_model(STREAM_IDS[size])
+    if not args.skip_model:
+        for size in args.sizes:
+            if "gen" in args.variants:
+                fetch_model(GEN_IDS[size])
+            if "stream" in args.variants:
+                fetch_model(STREAM_IDS[size])
 
     if not args.skip_dataset:
         fetch_dataset()

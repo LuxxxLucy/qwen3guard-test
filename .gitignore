@@ -1,17 +1,30 @@
 __pycache__/
 *.pyc
+*.bak
 .venv/
+.venv-vllm/
 .uv-cache/
 uv.lock.bak
 
-# benchmark outputs
-results/*.json
+# All runtime-generated data: exported models, bench JSONs, logs, vendor clone,
+# HF cache. One umbrella keeps the top-level clean — only source lives at root.
+var/
 
-# locally exported ONNX weights (can be regenerated via scripts/)
-onnx_models/
+# Host-local stdout logs from earlier Linux runs (kept for diff archaeology).
+linux_box_log/
 
-# HF cache lives in ~/.cache/huggingface by default; ignore any stray local copies
-hf_cache/
+# Rust candle backend build + generated benchmark inputs.
+src/backends/rust/target/
+src/backends/rust/bench_inputs.json
+src/backends/rust/verify_logits.json
 
-# Local project status/notes (not part of the shipped artifact)
+# Local working notes (not part of the shipped artifact).
 status.md
+plan.md
+done.md
+
+uv.lock
+**/Cargo.lock
+
+# macOS metadata.
+.DS_Store

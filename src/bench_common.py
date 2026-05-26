@@ -1,33 +1,14 @@
-"""Shared benchmark utilities: device/dtype selection, sample pools, latency stats."""
+"""Shared benchmark utilities: sample pools, latency stats, result writer."""
 from __future__ import annotations
 
 import json
-import os
 import platform
 import random
 import statistics
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Callable, Iterable
-
-
-def pick_device() -> str:
-    import torch
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-def pick_dtype(device: str):
-    import torch
-    return torch.bfloat16 if device == "cuda" else torch.float32
-
-
-def sync(device: str) -> None:
-    import torch
-    if device == "cuda":
-        torch.cuda.synchronize()
+from typing import Callable
 
 
 @dataclass
@@ -84,22 +65,22 @@ class BenchResult:
     host: str = ""
     torch_version: str = ""
 
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
 
-
-def write_result(res: BenchResult, out_dir: Path) -> Path:
-    import torch
+def write_result(res: BenchResult, out_dir: Path, tag: str = "") -> Path:
     from datetime import datetime, timezone
+    try:
+        import torch
+        res.torch_version = torch.__version__
+    except Exception:
+        # CPU runtimes (ONNX / OpenVINO / llama.cpp) need not have torch.
+        res.torch_version = ""
     res.timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     res.host = platform.node()
-    res.torch_version = torch.__version__
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = res.timestamp_utc.replace(":", "").replace("-", "")
-    name = f"bench_{res.variant}_{res.runtime}_{res.device}_{stamp}.json"
+    name = f"bench_{res.variant}_{res.runtime}_{res.device}{tag}_{stamp}.json"
     path = out_dir / name
-    path.write_text(json.dumps(res.to_dict(), indent=2))
+    path.write_text(json.dumps(asdict(res), indent=2))
     return path
 
 
@@ -109,10 +90,9 @@ def load_representative_texts(
     target_median_band_pct: float = 0.10,
     seed: int = 0,
 ) -> list[str]:
-    """Load Qwen3GuardTest response field, pick samples near the median length.
-
-    Falls back to a fixed synthetic list if dataset unavailable.
-    """
+    """Load Qwen3GuardTest assistant messages, pick samples near the median
+    tokenized length. Falls back to a fixed synthetic list if dataset
+    unavailable. `tokenizer` is required."""
     fallback = _fallback_texts()
     try:
         from datasets import load_dataset
@@ -125,31 +105,21 @@ def load_representative_texts(
         return fallback[:max_samples]
 
     texts: list[str] = []
-    if "message" in ds.column_names:
-        for msg in ds["message"]:
-            # Prefer the assistant turn; fall back to the user turn.
-            picked = None
-            for m in msg:
-                if m.get("role") == "assistant" and m.get("content"):
-                    picked = m["content"]
-                    break
-            if picked is None and msg:
-                picked = msg[0].get("content")
-            if picked and isinstance(picked, str):
-                texts.append(picked)
-    else:
-        for cand in ("response", "prompt", "text", "content"):
-            if cand in ds.column_names:
-                texts = [t for t in ds[cand] if isinstance(t, str) and t.strip()]
+    for msg in ds["message"]:
+        # Prefer the assistant turn; fall back to the user turn.
+        picked = None
+        for m in msg:
+            if m.get("role") == "assistant" and m.get("content"):
+                picked = m["content"]
                 break
+        if picked is None and msg:
+            picked = msg[0].get("content")
+        if picked and isinstance(picked, str):
+            texts.append(picked)
     if not texts:
         return fallback[:max_samples]
 
-    if tokenizer is None:
-        # length by char count as a coarse proxy
-        lens = [len(t) for t in texts]
-    else:
-        lens = [len(tokenizer.encode(t, add_special_tokens=False)) for t in texts]
+    lens = [len(tokenizer.encode(t, add_special_tokens=False)) for t in texts]
 
     median = statistics.median(lens)
     band = target_median_band_pct
@@ -232,17 +202,13 @@ def warmup_and_measure(
     step: Callable[[str], None],
     samples: list[str],
     n_warmup: int,
-    device: str,
 ) -> list[float]:
     for i in range(min(n_warmup, len(samples))):
         step(samples[i])
-    sync(device)
 
     latencies: list[float] = []
     for s in samples:
-        sync(device)
         t0 = time.perf_counter()
         step(s)
-        sync(device)
         latencies.append(time.perf_counter() - t0)
     return latencies
